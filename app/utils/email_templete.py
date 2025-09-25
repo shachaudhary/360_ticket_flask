@@ -263,3 +263,94 @@ def send_follow_email(ticket, user_info, action_by=None, action_type="updated"):
 
 
 
+def send_update_ticket_email(ticket, user_info, updater_info, changes):
+    """
+    Send email notification when a ticket is updated.
+    Changes = list of tuples like: [("status", "Pending", "Completed"), ("priority", "Low", "High")]
+    """
+    if not user_info or not user_info.get("email"):
+        print("⚠️ No valid email for user, skipping update notification")
+        return
+
+    updater_name = updater_info["username"] if updater_info else "System"
+    subject = f"[Dental360] Ticket #{ticket.id} - Updated"
+
+    # ✅ Changes ko readable bana do
+    changes_text = "\n".join([f"{field}: {old} → {new}" for field, old, new in changes]) or "—"
+    changes_html = "".join([
+        f"<tr><td><strong>{field}</strong></td><td>{old} → {new}</td></tr>"
+        for field, old, new in changes
+    ]) or "<tr><td colspan='2'>—</td></tr>"
+
+    # Plain text fallback
+    body_text = (
+        f"Dental360 Support\n\n"
+        f"Hello {user_info['username']},\n\n"
+        f"A ticket you follow has been updated:\n\n"
+        f"Ticket ID: {ticket.id}\n"
+        f"Title: {ticket.title}\n"
+        f"Updated By: {updater_name}\n"
+        f"{changes_text}\n\n"
+        f"You can log in to the Dental360 portal to review the ticket.\n\n"
+        f"Best Regards,\nDental360 Support Team"
+    )
+
+    # HTML template
+    body_html = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8" /></head>
+<body style="font-family: Arial, sans-serif; background:#f4f6f8; color:#333;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
+    <tr>
+        <td align="center">
+        <table width="600" style="background:#ffffff; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
+            <tr>
+                <td style="background:#0d6efd; padding:20px; text-align:center; color:#fff; font-size:20px; font-weight:bold;">
+                    Dental360 Support
+                </td>
+            </tr>
+            <tr>
+                <td style="padding:25px;">
+                    <p>Hello <strong>{user_info['username']}</strong>,</p>
+                    <p>A ticket you follow has been updated:</p>
+                    <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0; border-radius:6px;">
+                        <tr style="background:#f9f9f9;">
+                            <td width="30%"><strong>Ticket ID</strong></td>
+                            <td>{ticket.id}</td>
+                        </tr>
+                        <tr><td><strong>Title</strong></td><td>{ticket.title}</td></tr>
+                        <tr style="background:#f9f9f9;">
+                            <td><strong>Updated By</strong></td>
+                            <td>{updater_name}</td>
+                        </tr>
+                        {changes_html}
+                    </table>
+                    <p style="margin:20px 0;">You can log in to the 
+                    <a href="https://dental360grp.com" style="color:#0d6efd;">Dental360 portal</a> 
+                    to review and respond.</p>
+                    <p>Best Regards,<br><strong>Dental360 Support Team</strong></p>
+                </td>
+            </tr>
+            <tr>
+                <td style="background:#f4f6f8; padding:15px; text-align:center; font-size:12px; color:#888;">
+                    © {datetime.now().year} Dental360. All rights reserved.<br>
+                    3435 W. Irving Park Rd, Chicago, IL<br>
+                    <a href="https://dental360grp.com/unsubscribe" style="color:#888;">Unsubscribe</a>
+                </td>
+            </tr>
+        </table>
+        </td>
+    </tr>
+    </table>
+</body>
+</html>
+"""
+
+    # ✅ Async send
+    print(f"📧 Sending update email → {user_info['email']} | Ticket #{ticket.id}")
+    threading.Thread(
+        target=send_email,
+        args=(user_info["email"], subject, body_html, body_text)
+    ).start()
+

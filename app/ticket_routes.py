@@ -9,8 +9,9 @@ from sqlalchemy import or_, and_
 
 from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp
 from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id
-from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email
+from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
+from app.dashboard_routes import require_api_key, validate_token
 # ─── Windows Fix for asyncio ─────────────────────────────────────────────
 # if sys.platform.startswith("win"):
 #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -139,6 +140,7 @@ def create_ticket():
 
 # ─────────────────────────────────────────────
 # Update Ticket
+# ─────────────────────────────────────────────
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["PATCH"])
 def update_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
@@ -146,7 +148,11 @@ def update_ticket(ticket_id):
         return jsonify({"error": "Ticket not found"}), 404
 
     data = request.form if request.form else request.json
-    updated_fields = []  # Track changes for followups
+    updated_fields = []  # Track changes
+
+    # 👇 Always resolve updater info first
+    updater_id = int(data.get("updated_by")) if data.get("updated_by") else None
+    updater_info = get_user_info_by_id(updater_id)
 
     # --- Title
     if "title" in data and data["title"] != ticket.title:
@@ -190,34 +196,77 @@ def update_ticket(ticket_id):
     db.session.commit()
 
     # -----------------------------
-    # Create Followups for changes
-    for field, old, new in updated_fields:
-        followup = TicketFollowUp(
-            ticket_id=ticket.id,
-            user_id=data.get("updated_by"),
-            note=f"{field} changed from '{old}' to '{new}'",
-            created_at=datetime.utcnow()
-        )
-        db.session.add(followup)
-    db.session.commit()
+    # 📩 Helper: Get recipients (assign_by + assign_to + ALL followups)
+    def get_notification_recipients(ticket, updater_id):
+        recipients = set()
+        assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+        assign_by = assignment.assign_by if assignment else None
+        assign_to = assignment.assign_to if assignment else None
+
+        if assign_by and assign_by != updater_id:
+            recipients.add(assign_by)
+        if assign_to and assign_to != updater_id:
+            recipients.add(assign_to)
+
+        # 🔹 Explicitly include ALL followups (except updater)
+        followups = TicketFollowUp.query.filter_by(ticket_id=ticket.id).all()
+        print("DEBUG followups in DB:", [(f.user_id, f.note) for f in followups])
+        for fu in followups:
+                recipients.add(fu.user_id)
+
+        return list(recipients)
 
     # -----------------------------
-    # Handle followup user emails
-    followup_user_ids = data.get("followup_user_ids")
-    if followup_user_ids:
-        ids = [int(uid.strip()) for uid in followup_user_ids.split(",") if str(uid).strip().isdigit()]
-        for uid in ids:
+    # Notify targeted users about changes
+    if updated_fields:
+        recipients = get_notification_recipients(ticket, updater_id)
+        change_summary = ", ".join([f"{f}: {o} → {n}" for f, o, n in updated_fields])
+
+        # Fetch assignment once for debug printing
+        assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+        assign_by = assignment.assign_by if assignment else None
+        assign_to = assignment.assign_to if assignment else None
+
+        print("\n📩 Notification Debug Log")
+        print(f"➡️ Updater ID: {updater_id}")
+        print(f"➡️ assign_by: {assign_by}, assign_to: {assign_to}")
+        print(f"➡️ Recipients selected: {recipients}")
+        print(f"➡️ Changes: {change_summary}\n")
+
+        for uid in recipients:
             user_info = get_user_info_by_id(uid)
-            if user_info:
-                send_follow_email(ticket, user_info)
-                # ✅ Save notification
-                create_notification(
-                    ticket_id=ticket.id,
-                    user_id=uid,
-                    notif_type="followup",
-                    message="Added as follow-up user"
-                )
-                # also save followup
+            if not user_info:
+                continue
+
+            # Debug role printing
+            role = []
+            if uid == assign_by:
+                role.append("ASSIGN_BY")
+            if uid == assign_to:
+                role.append("ASSIGN_TO")
+            if TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first():
+                role.append("FOLLOWUP")
+
+            print(f"✅ Email/Notif sent to user_id={uid}, "
+                  f"username={user_info.get('username')}, "
+                  f"roles={','.join(role) if role else 'N/A'}")
+
+            # Send email + notification
+            send_update_ticket_email(ticket, user_info, updater_info, updated_fields)
+            create_notification(
+                ticket_id=ticket.id,
+                user_id=uid,
+                notif_type="update",
+                message=f"Ticket updated ({change_summary})"
+            )
+
+    # -----------------------------
+    # Handle newly added followups
+    if "followup_user_ids_add" in data:
+        ids = [int(uid.strip()) for uid in str(data["followup_user_ids_add"]).split(",") if uid.strip().isdigit()]
+        for uid in ids:
+            existing = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
+            if not existing:
                 fu = TicketFollowUp(
                     ticket_id=ticket.id,
                     user_id=uid,
@@ -225,7 +274,37 @@ def update_ticket(ticket_id):
                     created_at=datetime.utcnow()
                 )
                 db.session.add(fu)
-        db.session.commit()
+                db.session.commit()
+
+                user_info = get_user_info_by_id(uid)
+                if user_info:
+                    send_update_ticket_email(ticket, user_info, updater_info, [("followup", "-", "added")])
+                    create_notification(
+                        ticket_id=ticket.id,
+                        user_id=uid,
+                        notif_type="followup",
+                        message="Added as follow-up user"
+                    )
+
+    # -----------------------------
+    # Handle removed followups
+    if "followup_user_ids_remove" in data:
+        ids = [int(uid.strip()) for uid in str(data["followup_user_ids_remove"]).split(",") if uid.strip().isdigit()]
+        for uid in ids:
+            fu = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
+            if fu:
+                db.session.delete(fu)
+                db.session.commit()
+
+                user_info = get_user_info_by_id(uid)
+                if user_info:
+                    send_update_ticket_email(ticket, user_info, updater_info, [("followup", "added", "removed")])
+                    create_notification(
+                        ticket_id=ticket.id,
+                        user_id=uid,
+                        notif_type="followup",
+                        message="Removed from follow-up users"
+                    )
 
     # -----------------------------
     # Handle category assignee email if category changed
@@ -236,8 +315,6 @@ def update_ticket(ticket_id):
             assigner_info = get_user_info_by_id(ticket.user_id)
             if assignee_info:
                 send_assign_email(ticket, assignee_info, assigner_info)
-                
-                # ✅ Save notification
                 create_notification(
                     ticket_id=ticket.id,
                     user_id=assignee_info["id"],
@@ -263,7 +340,7 @@ def update_ticket(ticket_id):
 
     return jsonify({
         "success": True,
-        "message": "Ticket updated with followups & emails",
+        "message": "Ticket updated and notifications sent",
         "ticket": {
             "id": ticket.id,
             "title": ticket.title,
@@ -361,41 +438,64 @@ def assign_ticket():
 # ─────────────────────────────────────────────
 # Get All Tickets (with Pagination)
 @ticket_bp.route("/tickets", methods=["GET"])
+@require_api_key
+@validate_token
 def get_tickets():
-    user_id = request.args.get("user_id", type=int)
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
 
-    if not user_id:
-        return jsonify({"error": "user_id is required"}), 400
+    # ✅ Filters
+    status = request.args.get("status")
+    category_id = request.args.get("category_id", type=int)
+    assign_to = request.args.get("assign_to", type=int)
+    assign_by = request.args.get("assign_by", type=int)
+    followup = request.args.get("followup", type=int)
+    tag = request.args.get("tag", type=int)
+    created_by = request.args.get("created_by", type=int)  # 👈 new filter
+    search = request.args.get("search", "").strip()
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
 
-    # ✅ User info cache
-    user_cache = {}
+    # ✅ Base query (sab tickets visible for everyone)
+    query = Ticket.query
 
-    def get_user_cached(uid):
-        if not uid:
-            return None
-        if uid in user_cache:
-            return user_cache[uid]
-        user_cache[uid] = get_user_info_by_id(uid)
-        return user_cache[uid]
+    # ✅ Apply filters
+    if status:
+        query = query.filter(Ticket.status.ilike(f"%{status}%"))
+    if category_id:
+        query = query.filter(Ticket.category_id == category_id)
+    if start_date:
+        query = query.filter(Ticket.created_at >= start_date)
+    if end_date:
+        query = query.filter(Ticket.created_at <= end_date)
+    if search:
+        query = query.filter(or_(
+            Ticket.title.ilike(f"%{search}%"),
+            Ticket.details.ilike(f"%{search}%")
+        ))
 
-    # ✅ Get user info
-    user_info = get_user_cached(user_id)
-    if not user_info:
-        return jsonify({"error": "Invalid user"}), 404
+    # Strict filters
+    if created_by:
+        query = query.filter(Ticket.user_id == created_by)
 
-    user_role = user_info.get("role", "").lower()
+    if assign_to:
+        ticket_ids = [a.ticket_id for a in TicketAssignment.query.filter_by(assign_to=assign_to).all()]
+        query = query.filter(Ticket.id.in_(ticket_ids))
 
-    # ✅ Admin & Superadmin → all tickets
-    if user_role in ["admin", "superadmin"]:
-        query = Ticket.query.order_by(Ticket.created_at.desc())
-    else:
-        # ✅ Normal user → created + assigned
-        assigned_ticket_ids = db.session.query(TicketAssignment.ticket_id).filter_by(assign_to=user_id).subquery()
-        query = Ticket.query.filter(
-            (Ticket.user_id == user_id) | (Ticket.id.in_(assigned_ticket_ids))
-        ).order_by(Ticket.created_at.desc())
+    if assign_by:
+        ticket_ids = [a.ticket_id for a in TicketAssignment.query.filter_by(assign_by=assign_by).all()]
+        query = query.filter(Ticket.id.in_(ticket_ids))
+
+    if followup:
+        ticket_ids = [f.ticket_id for f in TicketFollowUp.query.filter_by(user_id=followup).all()]
+        query = query.filter(Ticket.id.in_(ticket_ids))
+
+    if tag:
+        ticket_ids = [t.ticket_id for t in TicketTag.query.filter_by(tag_name=str(tag)).all()]
+        query = query.filter(Ticket.id.in_(ticket_ids))
+
+    # ✅ Order by latest
+    query = query.order_by(Ticket.created_at.desc())
 
     # ✅ Pagination
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
@@ -403,14 +503,14 @@ def get_tickets():
 
     result = []
     for t in tickets:
-        created_by = get_user_cached(t.user_id)
+        created_by_info = get_user_info_by_id(t.user_id) if t.user_id else None
 
-        # ✅ Assignees
+        # Assignees
         assignments = TicketAssignment.query.filter_by(ticket_id=t.id).all()
         assignees = []
         for a in assignments:
-            assign_by_info = get_user_cached(a.assign_by)
-            assign_to_info = get_user_cached(a.assign_to)
+            assign_by_info = get_user_info_by_id(a.assign_by) if a.assign_by else None
+            assign_to_info = get_user_info_by_id(a.assign_to) if a.assign_to else None
             assignees.append({
                 "assign_by": a.assign_by,
                 "assign_by_username": assign_by_info["username"] if assign_by_info else None,
@@ -419,19 +519,17 @@ def get_tickets():
                 "assigned_at": a.assigned_at
             })
 
-        # ✅ Files
-        files = [
-            {"name": f.file_name, "url": f.file_url}
-            for f in TicketFile.query.filter_by(ticket_id=t.id).all()
-        ]
+        # Files
+        files = [{"name": f.file_name, "url": f.file_url}
+                 for f in TicketFile.query.filter_by(ticket_id=t.id).all()]
 
-        # ✅ Tags
+        # Tags
         tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=t.id).all()]
 
-        # ✅ Comments
+        # Comments
         comments = []
         for c in TicketComment.query.filter_by(ticket_id=t.id).order_by(TicketComment.created_at.desc()).all():
-            u_info = get_user_cached(c.user_id)
+            u_info = get_user_info_by_id(c.user_id)
             comments.append({
                 "user_id": c.user_id,
                 "username": u_info["username"] if u_info else None,
@@ -439,10 +537,10 @@ def get_tickets():
                 "created_at": c.created_at
             })
 
-        # ✅ FollowUps
+        # Followups
         followups = []
         for f in TicketFollowUp.query.filter_by(ticket_id=t.id).all():
-            u_info = get_user_cached(f.user_id)
+            u_info = get_user_info_by_id(f.user_id)
             followups.append({
                 "id": f.id,
                 "note": f.note,
@@ -452,18 +550,12 @@ def get_tickets():
                 "created_at": f.created_at
             })
 
-        # ✅ Category
-        category_obj = Category.query.get(t.category_id) if t.category_id else None
-        category_data = {
-            "id": category_obj.id,
-            "name": category_obj.name,
-            "is_active": category_obj.is_active
-        } if category_obj else None
-
-        # ✅ Role
-        role = None
-        if user_role not in ["admin", "superadmin"]:
-            role = "creator" if t.user_id == user_id else "assignee"
+        # Category
+        category = None
+        if getattr(t, "category_id", None):
+            cat = Category.query.get(t.category_id)
+            if cat:
+                category = {"id": cat.id, "name": cat.name, "is_active": cat.is_active}
 
         result.append({
             "id": t.id,
@@ -474,14 +566,13 @@ def get_tickets():
             "due_date": t.due_date,
             "created_at": t.created_at,
             "completed_at": getattr(t, "completed_at", None),
-            "created_by": created_by,
+            "created_by": created_by_info,
             "assignees": assignees,
             "files": files,
             "tags": tags,
             "comments": comments,
             "followups": followups,
-            "category": category_data,
-            "role": role
+            "category": category
         })
 
     return jsonify({
@@ -493,6 +584,7 @@ def get_tickets():
             "pages": pagination.pages
         }
     })
+
 
 # ─────────────────────────────────────────────
 # Get Ticket with all details
@@ -621,16 +713,42 @@ def add_ticket_activity(ticket_id):
             "created_at": comment.created_at
         }
 
-        # ✅ Send notification to all followup users
+        # ✅ Collect recipients
+        recipients = set()
+
+        # 1. Saare followups (except commenter)
         followups = TicketFollowUp.query.filter_by(ticket_id=ticket_id).all()
+        print("DEBUG followups in DB:", [(f.user_id, f.note) for f in followups])
         for fu in followups:
-            if fu.user_id != user_id:  # apne aap ko notify na karo
-                create_notification(
-                    ticket_id=ticket.id,
-                    user_id=fu.user_id,
-                    notif_type="followup",
-                    message=f"New comment added by {commenter_info.get('username') if commenter_info else 'User'}"
-                )
+            if fu.user_id and fu.user_id != user_id:
+                recipients.add(fu.user_id)
+
+        # 2. assign_by / assign_to (except commenter)
+        assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+        if assignment:
+            if assignment.assign_by and assignment.assign_by != user_id:
+                recipients.add(assignment.assign_by)
+            if assignment.assign_to and assignment.assign_to != user_id:
+                recipients.add(assignment.assign_to)
+
+        # ✅ Send email + notification to all recipients
+        for uid in recipients:
+            target_info = get_user_info_by_id(uid)
+            if not target_info:
+                continue
+
+            send_update_ticket_email(
+                ticket,
+                target_info,
+                commenter_info,
+                [("comment", "-", comment.comment)]
+            )
+            create_notification(
+                ticket_id=ticket.id,
+                user_id=uid,
+                notif_type="comment",
+                message=f"New comment added by {commenter_info.get('username') if commenter_info else 'User'}"
+            )
 
     # ─── Add Tags ───
     if user_ids and isinstance(user_ids, list):
@@ -655,7 +773,6 @@ def add_ticket_activity(ticket_id):
                     assigner_info,
                     comment=comment
                 )
-                # ✅ Save notification for tagged user
                 create_notification(
                     ticket_id=ticket.id,
                     user_id=uid,
@@ -670,7 +787,6 @@ def add_ticket_activity(ticket_id):
         return jsonify({"error": "Either comment or user_ids required"}), 400
 
     return jsonify(response_data), 200
-
 
 # ─────────────────────────────────────────────
 # Delete Ticket
@@ -893,3 +1009,136 @@ def filter_tickets():
 #         "tags": added_tags
 #     })
 
+# @ticket_bp.route("/tickets", methods=["GET"])
+# def get_tickets():
+#     user_id = request.args.get("user_id", type=int)
+#     page = request.args.get("page", 1, type=int)
+#     per_page = request.args.get("per_page", 10, type=int)
+
+#     if not user_id:
+#         return jsonify({"error": "user_id is required"}), 400
+
+#     # ✅ User info cache
+#     user_cache = {}
+
+#     def get_user_cached(uid):
+#         if not uid:
+#             return None
+#         if uid in user_cache:
+#             return user_cache[uid]
+#         user_cache[uid] = get_user_info_by_id(uid)
+#         return user_cache[uid]
+
+#     # ✅ Get user info
+#     user_info = get_user_cached(user_id)
+#     if not user_info:
+#         return jsonify({"error": "Invalid user"}), 404
+
+#     user_role = user_info.get("role", "").lower()
+
+#     # ✅ Admin & Superadmin → all tickets
+#     if user_role in ["admin", "superadmin"]:
+#         query = Ticket.query.order_by(Ticket.created_at.desc())
+#     else:
+#         # ✅ Normal user → created + assigned
+#         assigned_ticket_ids = db.session.query(TicketAssignment.ticket_id).filter_by(assign_to=user_id).subquery()
+#         query = Ticket.query.filter(
+#             (Ticket.user_id == user_id) | (Ticket.id.in_(assigned_ticket_ids))
+#         ).order_by(Ticket.created_at.desc())
+
+#     # ✅ Pagination
+#     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+#     tickets = pagination.items
+
+#     result = []
+#     for t in tickets:
+#         created_by = get_user_cached(t.user_id)
+
+#         # ✅ Assignees
+#         assignments = TicketAssignment.query.filter_by(ticket_id=t.id).all()
+#         assignees = []
+#         for a in assignments:
+#             assign_by_info = get_user_cached(a.assign_by)
+#             assign_to_info = get_user_cached(a.assign_to)
+#             assignees.append({
+#                 "assign_by": a.assign_by,
+#                 "assign_by_username": assign_by_info["username"] if assign_by_info else None,
+#                 "assign_to": a.assign_to,
+#                 "assign_to_username": assign_to_info["username"] if assign_to_info else None,
+#                 "assigned_at": a.assigned_at
+#             })
+
+#         # ✅ Files
+#         files = [
+#             {"name": f.file_name, "url": f.file_url}
+#             for f in TicketFile.query.filter_by(ticket_id=t.id).all()
+#         ]
+
+#         # ✅ Tags
+#         tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=t.id).all()]
+
+#         # ✅ Comments
+#         comments = []
+#         for c in TicketComment.query.filter_by(ticket_id=t.id).order_by(TicketComment.created_at.desc()).all():
+#             u_info = get_user_cached(c.user_id)
+#             comments.append({
+#                 "user_id": c.user_id,
+#                 "username": u_info["username"] if u_info else None,
+#                 "comment": c.comment,
+#                 "created_at": c.created_at
+#             })
+
+#         # ✅ FollowUps
+#         followups = []
+#         for f in TicketFollowUp.query.filter_by(ticket_id=t.id).all():
+#             u_info = get_user_cached(f.user_id)
+#             followups.append({
+#                 "id": f.id,
+#                 "note": f.note,
+#                 "user_id": f.user_id,
+#                 "username": u_info["username"] if u_info else None,
+#                 "followup_date": f.followup_date,
+#                 "created_at": f.created_at
+#             })
+
+#         # ✅ Category
+#         category_obj = Category.query.get(t.category_id) if t.category_id else None
+#         category_data = {
+#             "id": category_obj.id,
+#             "name": category_obj.name,
+#             "is_active": category_obj.is_active
+#         } if category_obj else None
+
+#         # ✅ Role
+#         role = None
+#         if user_role not in ["admin", "superadmin"]:
+#             role = "creator" if t.user_id == user_id else "assignee"
+
+#         result.append({
+#             "id": t.id,
+#             "title": t.title,
+#             "details": t.details,
+#             "priority": t.priority,
+#             "status": t.status,
+#             "due_date": t.due_date,
+#             "created_at": t.created_at,
+#             "completed_at": getattr(t, "completed_at", None),
+#             "created_by": created_by,
+#             "assignees": assignees,
+#             "files": files,
+#             "tags": tags,
+#             "comments": comments,
+#             "followups": followups,
+#             "category": category_data,
+#             "role": role
+#         })
+
+#     return jsonify({
+#         "tickets": result,
+#         "pagination": {
+#             "page": pagination.page,
+#             "per_page": pagination.per_page,
+#             "total": pagination.total,
+#             "pages": pagination.pages
+#         }
+#     })
