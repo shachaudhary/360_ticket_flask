@@ -8,12 +8,13 @@ ENV PYTHONUNBUFFERED=1
 # Set the working directory
 WORKDIR /app
 
-# Install system dependencies (including libpq-dev for PostgreSQL)
+# Install system dependencies (including libpq-dev for PostgreSQL and portaudio for PyAudio)
 RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
     python3-dev \
     build-essential \
+    portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install dependencies separately
@@ -27,11 +28,4 @@ COPY . .
 EXPOSE 5000
 
 # Run Gunicorn server
-# CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:5000", "app:app"]
-
 CMD ["gunicorn", "--workers", "4", "--threads", "2", "--timeout", "120", "--bind", "0.0.0.0:5000", "run:app"]
-
-# CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
-
-
-# CMD ["gunicorn", "--workers", "$(nproc)", "--bind", "0.0.0.0:5000", "app:app"]
