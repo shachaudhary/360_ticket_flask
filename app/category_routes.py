@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from app import db
 from app.model import Category
 from app.utils.helper_function import get_user_info_by_id
+from app.dashboard_routes import require_api_key, validate_token
 
 category_bp = Blueprint("category_bp", __name__)
 

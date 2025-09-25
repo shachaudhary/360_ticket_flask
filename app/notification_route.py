@@ -2,6 +2,11 @@ from flask import Blueprint, request, jsonify
 from app import db
 from app.model import Ticket, TicketNotification
 from app.utils.helper_function import get_user_info_by_id
+from app.dashboard_routes import require_api_key, validate_token
+
+
+
+
 notification_bp = Blueprint("notifications", __name__, url_prefix="notifications")
 
 # ───────────────────────────────
