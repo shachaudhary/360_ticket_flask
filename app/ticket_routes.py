@@ -330,7 +330,7 @@ def update_ticket(ticket_id):
                     receiver_id=assignee_info["id"],
                     sender_id=updater_id,
                     notification_type="assign",
-                    message=f"Assigned by {assigner_info.get('username') if assigner_info else 'System'}"
+                    message=f"Assigned"
                 )
 
     # -----------------------------
@@ -760,7 +760,7 @@ def add_ticket_activity(ticket_id):
                 receiver_id=uid,
                 sender_id=user_id,
                 notification_type="comment",
-                message=f"New comment added by {commenter_info.get('username') if commenter_info else 'User'}"
+                message=f"New comment added"
             )
 
     # ─── Add Tags ───
@@ -791,7 +791,7 @@ def add_ticket_activity(ticket_id):
                     receiver_id=uid,
                     sender_id=user_id,
                     notification_type="tag",
-                    message=f"Tagged by {assigner_info.get('username') if assigner_info else 'System'}"
+                    message=f"Tagged"
                 )
 
         response_data["tags"] = added_tags
