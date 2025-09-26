@@ -90,7 +90,7 @@ def create_ticket():
                     ticket_id=ticket.id,
                     receiver_id=uid,
                     sender_id=ticket.user_id,    # jisne ticket create ki
-                    notif_type="followup",
+                    notification_type="followup",
                     message=f"Added as follow-up by user {ticket.user_id}"
                 )
         db.session.commit()
@@ -127,7 +127,7 @@ def create_ticket():
                     ticket_id=ticket.id,
                     receiver_id=assignee_info["id"],
                     sender_id=ticket.user_id,   
-                    notif_type="assign",
+                    notification_type="assign",
                     message=f"Assigned to you by {assigner_info['username']}"
                 )
 
@@ -260,7 +260,7 @@ def update_ticket(ticket_id):
                 ticket_id=ticket.id,
                 receiver_id=uid,
                 sender_id=updater_id,
-                notif_type="update",
+                notification_type="update",
                 message=f"Ticket updated ({change_summary})"
             )
 
@@ -289,7 +289,7 @@ def update_ticket(ticket_id):
                         ticket_id=ticket.id,
                         receiver_id=uid,
                         sender_id=updater_id,
-                        notif_type="followup",
+                        notification_type="followup",
                         message="Added as follow-up user"
                     )
 
@@ -312,7 +312,7 @@ def update_ticket(ticket_id):
                         ticket_id=ticket.id,
                         receiver_id=uid,
                         sender_id=updater_id,
-                        notif_type="followup",
+                        notification_type="followup",
                         message="Removed from follow-up users"
                     )
 
@@ -329,7 +329,7 @@ def update_ticket(ticket_id):
                     ticket_id=ticket.id,
                     receiver_id=assignee_info["id"],
                     sender_id=updater_id,
-                    notif_type="assign",
+                    notification_type="assign",
                     message=f"Assigned by {assigner_info.get('username') if assigner_info else 'System'}"
                 )
 
@@ -430,7 +430,7 @@ def assign_ticket():
             ticket_id=ticket.id,
             receiver_id=assign_to,
             sender_id=assign_by,
-            notif_type="assign",
+            notification_type="assign",
             message=f"Assigned by {assigner_info.get('username') if assigner_info else 'System'}"
         )
 
@@ -759,7 +759,7 @@ def add_ticket_activity(ticket_id):
                 ticket_id=ticket.id,
                 receiver_id=uid,
                 sender_id=user_id,
-                notif_type="comment",
+                notification_type="comment",
                 message=f"New comment added by {commenter_info.get('username') if commenter_info else 'User'}"
             )
 
@@ -790,7 +790,7 @@ def add_ticket_activity(ticket_id):
                     ticket_id=ticket.id,
                     receiver_id=uid,
                     sender_id=user_id,
-                    notif_type="tag",
+                    notification_type="tag",
                     message=f"Tagged by {assigner_info.get('username') if assigner_info else 'System'}"
                 )
 
