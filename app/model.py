@@ -100,15 +100,18 @@ class TicketFollowUp(db.Model):
 
     def __repr__(self):
         return f"<TicketFollowUp {self.id} - {self.ticket_id}>"
+    
 class TicketNotification(db.Model):
     __tablename__ = "ticket_notifications"
 
     id = db.Column(db.Integer, primary_key=True)
     ticket_id = db.Column(db.Integer)
-    user_id = db.Column(db.Integer)
-    notification_type = db.Column(db.String(50))      # assign | tag | followup
-    message = db.Column(db.Text, nullable=True)       # optional message
+    receiver_id = db.Column(db.Integer)   # 👈 jis user ko notification gayi
+    sender_id = db.Column(db.Integer)     # 👈 jis user ne notification trigger ki
+    notification_type = db.Column(db.String(255))  # assign | tag | followup | comment | update
+    message = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def __repr__(self):
-        return f"<TicketNotification ticket={self.ticket_id} user={self.user_id} type={self.notification_type}>"
+        return f"<TicketNotification ticket={self.ticket_id} receiver={self.receiver_id} sender={self.sender_id} type={self.notification_type}>"
+

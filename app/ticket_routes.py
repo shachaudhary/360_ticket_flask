@@ -88,7 +88,8 @@ def create_ticket():
                 # 3. Save notification
                 create_notification(
                     ticket_id=ticket.id,
-                    user_id=uid,
+                    receiver_id=uid,
+                    sender_id=ticket.user_id,    # jisne ticket create ki
                     notif_type="followup",
                     message=f"Added as follow-up by user {ticket.user_id}"
                 )
@@ -124,7 +125,8 @@ def create_ticket():
                 # 3. Save notification
                 create_notification(
                     ticket_id=ticket.id,
-                    user_id=assignee_info["id"],
+                    receiver_id=assignee_info["id"],
+                    sender_id=ticket.user_id,   
                     notif_type="assign",
                     message=f"Assigned to you by {assigner_info['username']}"
                 )
@@ -212,6 +214,7 @@ def update_ticket(ticket_id):
         followups = TicketFollowUp.query.filter_by(ticket_id=ticket.id).all()
         print("DEBUG followups in DB:", [(f.user_id, f.note) for f in followups])
         for fu in followups:
+            if fu.user_id != updater_id:   # ✅ SKIP updater
                 recipients.add(fu.user_id)
 
         return list(recipients)
@@ -255,7 +258,8 @@ def update_ticket(ticket_id):
             send_update_ticket_email(ticket, user_info, updater_info, updated_fields)
             create_notification(
                 ticket_id=ticket.id,
-                user_id=uid,
+                receiver_id=uid,
+                sender_id=updater_id,
                 notif_type="update",
                 message=f"Ticket updated ({change_summary})"
             )
@@ -265,6 +269,8 @@ def update_ticket(ticket_id):
     if "followup_user_ids_add" in data:
         ids = [int(uid.strip()) for uid in str(data["followup_user_ids_add"]).split(",") if uid.strip().isdigit()]
         for uid in ids:
+            if uid == updater_id:   # ✅ skip if updater adding himself
+                continue
             existing = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
             if not existing:
                 fu = TicketFollowUp(
@@ -281,7 +287,8 @@ def update_ticket(ticket_id):
                     send_update_ticket_email(ticket, user_info, updater_info, [("followup", "-", "added")])
                     create_notification(
                         ticket_id=ticket.id,
-                        user_id=uid,
+                        receiver_id=uid,
+                        sender_id=updater_id,
                         notif_type="followup",
                         message="Added as follow-up user"
                     )
@@ -291,6 +298,8 @@ def update_ticket(ticket_id):
     if "followup_user_ids_remove" in data:
         ids = [int(uid.strip()) for uid in str(data["followup_user_ids_remove"]).split(",") if uid.strip().isdigit()]
         for uid in ids:
+            if uid == updater_id:   # ✅ skip if updater removing himself
+                continue
             fu = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
             if fu:
                 db.session.delete(fu)
@@ -301,7 +310,8 @@ def update_ticket(ticket_id):
                     send_update_ticket_email(ticket, user_info, updater_info, [("followup", "added", "removed")])
                     create_notification(
                         ticket_id=ticket.id,
-                        user_id=uid,
+                        receiver_id=uid,
+                        sender_id=updater_id,
                         notif_type="followup",
                         message="Removed from follow-up users"
                     )
@@ -317,7 +327,8 @@ def update_ticket(ticket_id):
                 send_assign_email(ticket, assignee_info, assigner_info)
                 create_notification(
                     ticket_id=ticket.id,
-                    user_id=assignee_info["id"],
+                    receiver_id=assignee_info["id"],
+                    sender_id=updater_id,
                     notif_type="assign",
                     message=f"Assigned by {assigner_info.get('username') if assigner_info else 'System'}"
                 )
@@ -417,7 +428,8 @@ def assign_ticket():
         # ✅ Save notification
         create_notification(
             ticket_id=ticket.id,
-            user_id=assign_to,
+            receiver_id=assign_to,
+            sender_id=assign_by,
             notif_type="assign",
             message=f"Assigned by {assigner_info.get('username') if assigner_info else 'System'}"
         )
@@ -745,7 +757,8 @@ def add_ticket_activity(ticket_id):
             )
             create_notification(
                 ticket_id=ticket.id,
-                user_id=uid,
+                receiver_id=uid,
+                sender_id=user_id,
                 notif_type="comment",
                 message=f"New comment added by {commenter_info.get('username') if commenter_info else 'User'}"
             )
@@ -775,7 +788,8 @@ def add_ticket_activity(ticket_id):
                 )
                 create_notification(
                     ticket_id=ticket.id,
-                    user_id=uid,
+                    receiver_id=uid,
+                    sender_id=user_id,
                     notif_type="tag",
                     message=f"Tagged by {assigner_info.get('username') if assigner_info else 'System'}"
                 )
