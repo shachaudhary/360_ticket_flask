@@ -27,7 +27,7 @@ def send_tag_email(ticket, tagged_user, assigner_info, comment=None):
         return
 
     assigner_name = assigner_info["username"] if assigner_info else "System"
-    subject = f"[Dental360] Ticket #{ticket.id} - You Were Tagged"
+    subject = f"Dental360 Ticket #{ticket.id} - You Were Tagged"
 
     # Plain text fallback
     body_text = (
@@ -107,7 +107,7 @@ def send_assign_email(ticket, assignee_info, assigner_info):
         return
 
     assigner_name = assigner_info["username"] if assigner_info else "System"
-    subject = f"[Dental360] New Ticket Assigned: {ticket.title}"
+    subject = f"Dental360 New Ticket Assigned: {ticket.title}"
 
     # Plain text fallback
     body_text = (
@@ -187,7 +187,7 @@ def send_follow_email(ticket, user_info, action_by=None, action_type="updated"):
         return
 
     actor_name = action_by["username"] if action_by else "System"
-    subject = f"[Dental360] Ticket #{ticket.id} {action_type.capitalize()}"
+    subject = f"Dental360 Ticket #{ticket.id} {action_type.capitalize()}"
 
     # Plain text fallback
     body_text = (
@@ -273,7 +273,7 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
         return
 
     updater_name = updater_info["username"] if updater_info else "System"
-    subject = f"[Dental360] Ticket #{ticket.id} - Updated"
+    subject = f"Dental360 Ticket #{ticket.id} - Updated"
 
     # ✅ Changes ko readable bana do
     changes_text = "\n".join([f"{field}: {old} → {new}" for field, old, new in changes]) or "—"
