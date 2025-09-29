@@ -282,19 +282,30 @@ def update_ticket(ticket_id):
                 db.session.add(fu)
                 db.session.commit()
 
-                user_info = get_user_info_by_id(uid)
-                if user_info:
-                    send_update_ticket_email(ticket, user_info, updater_info, [("followup", "-", "added")])
-                    create_notification(
-                        ticket_id=ticket.id,
-                        receiver_id=uid,
-                        sender_id=updater_id,
-                        notification_type="followup",
-                        message="Added as follow-up user"
-                    )
+                # ---- recipients: new followup + assign_by + assign_to (except updater)
+                assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+                recipients = {uid}
+                if assignment:
+                    if assignment.assign_by and assignment.assign_by != updater_id:
+                        recipients.add(assignment.assign_by)
+                    if assignment.assign_to and assignment.assign_to != updater_id:
+                        recipients.add(assignment.assign_to)
+
+                for rid in recipients:
+                    user_info = get_user_info_by_id(rid)
+                    if user_info:
+                        send_update_ticket_email(ticket, user_info, updater_info, [("followup", "-", "added")])
+                        create_notification(
+                            ticket_id=ticket.id,
+                            receiver_id=rid,
+                            sender_id=updater_id,
+                            notification_type="followup",
+                            message=f"User {uid} added as follow-up"
+                        )
 
     # -----------------------------
     # Handle removed followups
+
     if "followup_user_ids_remove" in data:
         ids = [int(uid.strip()) for uid in str(data["followup_user_ids_remove"]).split(",") if uid.strip().isdigit()]
         for uid in ids:
@@ -305,16 +316,25 @@ def update_ticket(ticket_id):
                 db.session.delete(fu)
                 db.session.commit()
 
-                user_info = get_user_info_by_id(uid)
-                if user_info:
-                    send_update_ticket_email(ticket, user_info, updater_info, [("followup", "added", "removed")])
-                    create_notification(
-                        ticket_id=ticket.id,
-                        receiver_id=uid,
-                        sender_id=updater_id,
-                        notification_type="followup",
-                        message="Removed from follow-up users"
-                    )
+                assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+                recipients = {uid}
+                if assignment:
+                    if assignment.assign_by and assignment.assign_by != updater_id:
+                        recipients.add(assignment.assign_by)
+                    if assignment.assign_to and assignment.assign_to != updater_id:
+                        recipients.add(assignment.assign_to)
+
+                for rid in recipients:
+                    user_info = get_user_info_by_id(rid)
+                    if user_info:
+                        send_update_ticket_email(ticket, user_info, updater_info, [("followup", "added", "removed")])
+                        create_notification(
+                            ticket_id=ticket.id,
+                            receiver_id=rid,
+                            sender_id=updater_id,
+                            notification_type="followup",
+                            message=f"User {uid} removed from follow-up"
+                        )
 
     # -----------------------------
     # Handle category assignee email if category changed
