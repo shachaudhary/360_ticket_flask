@@ -276,7 +276,7 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
     subject = f"Dental360 Ticket #{ticket.id} - Updated"
 
     # ✅ Changes ko readable bana do
-    changes_text = "\n".join([f"{field}: {old} → {new}" for field, old, new in changes]) or "—"
+    changes_text = "\n".join([f"{field}: {old}  {new}" for field, old, new in changes]) or "—"
     changes_html = "".join([
         f"<tr><td><strong>{field}</strong></td><td>{old} → {new}</td></tr>"
         for field, old, new in changes

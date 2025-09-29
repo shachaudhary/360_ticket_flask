@@ -223,7 +223,7 @@ def update_ticket(ticket_id):
     # Notify targeted users about changes
     if updated_fields:
         recipients = get_notification_recipients(ticket, updater_id)
-        change_summary = ", ".join([f"{f}: {o} → {n}" for f, o, n in updated_fields])
+        change_summary = ", ".join([f"{f}: {o}  {n}" for f, o, n in updated_fields])
 
         # Fetch assignment once for debug printing
         assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
@@ -300,7 +300,7 @@ def update_ticket(ticket_id):
                             ticket,
                             user_info,
                             updater_info,
-                            [("followup", "-", f"added by {follower_name}")]
+                            [("followup", f"{follower_name} started following this ticket")]
                         )
                         create_notification(
                             ticket_id=ticket.id,
@@ -322,10 +322,10 @@ def update_ticket(ticket_id):
             if fu:
                 db.session.delete(fu)
                 db.session.commit()
-    
+
                 follower_info = get_user_info_by_id(uid)
                 follower_name = follower_info.get("username") if follower_info else f"User {uid}"
-    
+
                 assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
                 recipients = {uid}
                 if assignment:
@@ -333,7 +333,7 @@ def update_ticket(ticket_id):
                         recipients.add(assignment.assign_by)
                     if assignment.assign_to and assignment.assign_to != updater_id:
                         recipients.add(assignment.assign_to)
-    
+
                 for rid in recipients:
                     user_info = get_user_info_by_id(rid)
                     if user_info:
@@ -341,16 +341,16 @@ def update_ticket(ticket_id):
                             ticket,
                             user_info,
                             updater_info,
-                            [("followup", f"removed by {follower_name}", "-")]
+                            [("followup", f"{follower_name} unfollowed this ticket")]
                         )
                         create_notification(
                             ticket_id=ticket.id,
                             receiver_id=rid,
                             sender_id=updater_id,
                             notification_type="followup",
-                            message=f"{follower_name} has been removed from follow-up users"
+                            message=f"{follower_name} unfollowed this ticket"
                         )
-    
+
         # -----------------------------
     # Handle category assignee email if category changed
     if category_changed and ticket.category_id:
