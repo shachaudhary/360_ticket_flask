@@ -27,7 +27,7 @@ def send_tag_email(ticket, tagged_user, assigner_info, comment=None):
         return
 
     assigner_name = assigner_info["username"] if assigner_info else "System"
-    subject = f"Dental360 Ticket #{ticket.id} - You Were Tagged"
+    subject = f"Dental360 Ticket #{ticket.id}  You Were Tagged"
 
     # Plain text fallback
     body_text = (
