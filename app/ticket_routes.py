@@ -300,7 +300,7 @@ def update_ticket(ticket_id):
                             ticket,
                             user_info,
                             updater_info,
-                            [("followup", f"{follower_name} started following this ticket")]
+                            [("followup", "-", f"{follower_name} started following this ticket")]
                         )
                         create_notification(
                             ticket_id=ticket.id,
@@ -341,7 +341,7 @@ def update_ticket(ticket_id):
                             ticket,
                             user_info,
                             updater_info,
-                            [("followup", f"{follower_name} unfollowed this ticket")]
+                            [("followup", "-", f"{follower_name} unfollowed this ticket")]
                         )
                         create_notification(
                             ticket_id=ticket.id,
