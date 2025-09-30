@@ -113,3 +113,17 @@ class TicketNotification(db.Model):
 
     def __repr__(self):
         return f"<TicketNotification ticket={self.ticket_id} user={self.user_id} type={self.notification_type}>"
+
+
+class TicketStatusLog(db.Model):
+    __tablename__ = "ticket_status_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_id = db.Column(db.Integer, nullable=False)
+    old_status = db.Column(db.String(255))
+    new_status = db.Column(db.String(255))
+    changed_by = db.Column(db.Integer)  # jis user ne status change kiya
+    changed_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<TicketStatusLog ticket={self.ticket_id} {self.old_status} → {self.new_status}>"

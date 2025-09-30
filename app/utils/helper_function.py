@@ -7,7 +7,7 @@ from aiohttp import BasicAuth
 import asyncio
 import os
 import requests
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog
 
 
 # ─── S3 Config ──────────────────────────────────────────────
@@ -72,36 +72,6 @@ def send_email(to, subject, body_html, body_text=None):
         print(f"⚠️ Email sending failed: {e}")
         return False
 
-# async def send_email(to, subject, body, html=False):
-#     """
-#     Send email via Mailgun asynchronously.
-#     `body` can be plain text or HTML.
-#     """
-#     data = {
-#         "from": "support@360dentalbillingsolutions.com",
-#         "to": to,
-#         "subject": subject,
-#     }
-#     print(data)
-#     if html:
-#         data["html"] = body
-#     else:
-#         data["text"] = body
-
-#     async with aiohttp.ClientSession() as session:
-#         async with session.post(
-#             MAILGUN_API_URL,
-#             auth=BasicAuth("api", MAILGUN_API_KEY),
-#             data=data
-#         ) as response:
-#             if response.status == 200:
-#                 print(f"Email successfully sent to {to}")
-#                 return True
-#             else:
-#                 text = await response.text()
-#                 print(f"Failed to send email: {text}")
-#                 return False
-
 
 # ─── Helper: Get user info from external API ────────────────
 def get_user_info_by_id(user_id):
@@ -120,5 +90,27 @@ def get_user_info_by_id(user_id):
     except Exception as e:
         print(f"❌ Error fetching user info for {user_id}: {e}")
     return None
+
+
+def update_ticket_status(ticket_id, new_status, user_id):
+    ticket = Ticket.query.get(ticket_id)
+    if not ticket:
+        return None
+    
+    old_status = ticket.status
+    ticket.status = new_status
+    db.session.add(ticket)
+
+    # Log entry
+    log = TicketStatusLog(
+        ticket_id=ticket.id,
+        old_status=old_status,
+        new_status=new_status,
+        changed_by=user_id
+    )
+    db.session.add(log)
+    db.session.commit()
+    return ticket
+
 
 

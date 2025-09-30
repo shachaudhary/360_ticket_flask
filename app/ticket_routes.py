@@ -7,8 +7,8 @@ from aiohttp import BasicAuth
 import asyncio, sys, threading
 from sqlalchemy import or_, and_
 
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp
-from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, TicketStatusLog
+from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
 from app.dashboard_routes import require_api_key, validate_token
@@ -173,10 +173,14 @@ def update_ticket(ticket_id):
 
     # --- Status
     if "status" in data and data["status"] != ticket.status:
-        updated_fields.append(("status", ticket.status, data["status"]))
-        ticket.status = data["status"]
-        if ticket.status.lower() == "completed" and not ticket.completed_at:
+        old_status = ticket.status
+        new_status = data["status"]
+        updated_fields.append(("status", old_status, new_status))
+        # Helper call se status + log dono handle ho jaye ga
+        update_ticket_status(ticket.id, new_status, updater_id)
+        if new_status.lower() == "completed" and not ticket.completed_at:
             ticket.completed_at = datetime.utcnow()
+
 
     # --- Category
     category_changed = False
@@ -416,6 +420,7 @@ def update_ticket(ticket_id):
         }
     })
 
+
 # ─────────────────────────────────────────────
 # Assign Ticket
 @ticket_bp.route("/assign", methods=["POST"])
@@ -498,15 +503,13 @@ def get_tickets():
     assign_by = request.args.get("assign_by", type=int)
     followup = request.args.get("followup", type=int)
     tag = request.args.get("tag", type=int)
-    created_by = request.args.get("created_by", type=int)  # 👈 new filter
+    created_by = request.args.get("created_by", type=int)
     search = request.args.get("search", "").strip()
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
 
-    # ✅ Base query (sab tickets visible for everyone)
     query = Ticket.query
 
-    # ✅ Apply filters
     if status:
         query = query.filter(Ticket.status.ilike(f"%{status}%"))
     if category_id:
@@ -521,30 +524,22 @@ def get_tickets():
             Ticket.details.ilike(f"%{search}%")
         ))
 
-    # Strict filters
     if created_by:
         query = query.filter(Ticket.user_id == created_by)
-
     if assign_to:
         ticket_ids = [a.ticket_id for a in TicketAssignment.query.filter_by(assign_to=assign_to).all()]
         query = query.filter(Ticket.id.in_(ticket_ids))
-
     if assign_by:
         ticket_ids = [a.ticket_id for a in TicketAssignment.query.filter_by(assign_by=assign_by).all()]
         query = query.filter(Ticket.id.in_(ticket_ids))
-
     if followup:
         ticket_ids = [f.ticket_id for f in TicketFollowUp.query.filter_by(user_id=followup).all()]
         query = query.filter(Ticket.id.in_(ticket_ids))
-
     if tag:
         ticket_ids = [t.ticket_id for t in TicketTag.query.filter_by(tag_name=str(tag)).all()]
         query = query.filter(Ticket.id.in_(ticket_ids))
 
-    # ✅ Order by latest
     query = query.order_by(Ticket.created_at.desc())
-
-    # ✅ Pagination
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
     tickets = pagination.items
 
@@ -552,7 +547,6 @@ def get_tickets():
     for t in tickets:
         created_by_info = get_user_info_by_id(t.user_id) if t.user_id else None
 
-        # Assignees
         assignments = TicketAssignment.query.filter_by(ticket_id=t.id).all()
         assignees = []
         for a in assignments:
@@ -566,14 +560,10 @@ def get_tickets():
                 "assigned_at": a.assigned_at
             })
 
-        # Files
         files = [{"name": f.file_name, "url": f.file_url}
                  for f in TicketFile.query.filter_by(ticket_id=t.id).all()]
-
-        # Tags
         tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=t.id).all()]
 
-        # Comments
         comments = []
         for c in TicketComment.query.filter_by(ticket_id=t.id).order_by(TicketComment.created_at.desc()).all():
             u_info = get_user_info_by_id(c.user_id)
@@ -584,7 +574,6 @@ def get_tickets():
                 "created_at": c.created_at
             })
 
-        # Followups
         followups = []
         for f in TicketFollowUp.query.filter_by(ticket_id=t.id).all():
             u_info = get_user_info_by_id(f.user_id)
@@ -597,12 +586,23 @@ def get_tickets():
                 "created_at": f.created_at
             })
 
-        # Category
         category = None
         if getattr(t, "category_id", None):
             cat = Category.query.get(t.category_id)
             if cat:
                 category = {"id": cat.id, "name": cat.name, "is_active": cat.is_active}
+
+        # ✅ Status Logs
+        status_logs = []
+        for log in TicketStatusLog.query.filter_by(ticket_id=t.id).order_by(TicketStatusLog.changed_at.desc()).all():
+            u_info = get_user_info_by_id(log.changed_by)
+            status_logs.append({
+                "old_status": log.old_status,
+                "new_status": log.new_status,
+                "changed_by": log.changed_by,
+                "changed_by_username": u_info["username"] if u_info else None,
+                "changed_at": log.changed_at
+            })
 
         result.append({
             "id": t.id,
@@ -619,7 +619,8 @@ def get_tickets():
             "tags": tags,
             "comments": comments,
             "followups": followups,
-            "category": category
+            "category": category,
+            "status_logs": status_logs
         })
 
     return jsonify({
@@ -641,10 +642,8 @@ def get_ticket(ticket_id):
     if not ticket:
         return jsonify({"error": "Ticket not found"}), 404
 
-    # Creator info
     created_by = get_user_info_by_id(ticket.user_id) if ticket.user_id else None
 
-    # Assignees
     assignments = TicketAssignment.query.filter_by(ticket_id=ticket.id).all()
     assignees = []
     for a in assignments:
@@ -658,14 +657,10 @@ def get_ticket(ticket_id):
             "assigned_at": a.assigned_at
         })
 
-    # Files
     files = [{"name": f.file_name, "url": f.file_url}
              for f in TicketFile.query.filter_by(ticket_id=ticket.id).all()]
-
-    # Tags
     tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=ticket.id).all()]
 
-    # Comments
     comments = []
     for c in TicketComment.query.filter_by(ticket_id=ticket.id).all():
         u_info = get_user_info_by_id(c.user_id) if c.user_id else None
@@ -676,7 +671,6 @@ def get_ticket(ticket_id):
             "created_at": c.created_at
         })
 
-    # FollowUps
     followups = []
     for f in TicketFollowUp.query.filter_by(ticket_id=ticket.id).all():
         u_info = get_user_info_by_id(f.user_id)
@@ -689,7 +683,6 @@ def get_ticket(ticket_id):
             "created_at": f.created_at
         })
 
-    # Category
     category = None
     if getattr(ticket, "category_id", None):
         cat = Category.query.get(ticket.category_id)
@@ -699,6 +692,18 @@ def get_ticket(ticket_id):
                 "name": cat.name,
                 "is_active": cat.is_active
             }
+
+    # ✅ Status Logs
+    status_logs = []
+    for log in TicketStatusLog.query.filter_by(ticket_id=ticket.id).order_by(TicketStatusLog.changed_at.desc()).all():
+        u_info = get_user_info_by_id(log.changed_by)
+        status_logs.append({
+            "old_status": log.old_status,
+            "new_status": log.new_status,
+            "changed_by": log.changed_by,
+            "changed_by_username": u_info["username"] if u_info else None,
+            "changed_at": log.changed_at
+        })
 
     result = {
         "id": ticket.id,
@@ -715,10 +720,12 @@ def get_ticket(ticket_id):
         "tags": tags,
         "comments": comments,
         "followups": followups,
-        "category": category
+        "category": category,
+        "status_logs": status_logs
     }
 
     return jsonify(result)
+
 
 # ─────────────────────────────────────────────
 # Add Ticket Activity Comment, Tags 
