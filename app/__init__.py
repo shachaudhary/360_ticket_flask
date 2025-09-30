@@ -38,11 +38,13 @@ def create_app(config_path: str | None = None):
     from app.category_routes import category_bp
     from app.notification_route import notification_bp
     from app.dashboard_routes import dashboard_bp
+    from app.ticket_stats import stats_bp
 
     app.register_blueprint(ticket_bp, url_prefix="/api")
     app.register_blueprint(category_bp, url_prefix="/api")
     app.register_blueprint(notification_bp, url_prefix="/api")
     app.register_blueprint(dashboard_bp, url_prefix="/api")
+    app.register_blueprint(stats_bp, url_prefix="/api")
 
     # 5) health route
     @app.route("/")
