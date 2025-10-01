@@ -124,7 +124,9 @@ def update_ticket_assignment_log(ticket_id, old_assign_to, new_assign_to, change
         changed_by=changed_by
     )
     db.session.add(log)
+    db.session.commit()
     return log
+
 
 
 
