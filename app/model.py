@@ -45,7 +45,7 @@ class TicketAssignmentLog(db.Model):
     __tablename__ = "ticket_assignment_log"
 
     id = db.Column(db.Integer, primary_key=True)
-    ticket_id = db.Column(db.Integer, db.ForeignKey("ticket.id"), nullable=False)
+    ticket_id = db.Column(db.Integer, nullable=False)
     old_assign_to = db.Column(db.Integer, nullable=True)
     new_assign_to = db.Column(db.Integer, nullable=False)
     changed_by = db.Column(db.Integer, nullable=False)
