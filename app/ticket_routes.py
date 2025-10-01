@@ -7,8 +7,8 @@ from aiohttp import BasicAuth
 import asyncio, sys, threading
 from sqlalchemy import or_, and_
 
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, TicketStatusLog
-from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, TicketStatusLog, TicketAssignmentLog
+from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
 from app.dashboard_routes import require_api_key, validate_token
@@ -198,7 +198,33 @@ def update_ticket(ticket_id):
                 ticket.due_date = new_due_date
         except ValueError:
             return jsonify({"error": "Invalid due_date format. Use YYYY-MM-DD"}), 400
+    # --- Assignee Change (main part)
+    if "assign_to" in data:
+        new_assign_to = int(data["assign_to"])
+        assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
 
+        old_assign_to = assignment.assign_to if assignment else None
+        if old_assign_to != new_assign_to:
+            updated_fields.append(("assign_to", old_assign_to, new_assign_to))
+
+            if assignment:
+                assignment.assign_to = new_assign_to
+                assignment.assign_by = updater_id
+            else:
+                assignment = TicketAssignment(
+                    ticket_id=ticket.id,
+                    assign_to=new_assign_to,
+                    assign_by=updater_id
+                )
+                db.session.add(assignment)
+
+            # ✅ Log assignment change
+            update_ticket_assignment_log(
+                ticket_id=ticket.id,
+                old_assign_to=old_assign_to,
+                new_assign_to=new_assign_to,
+                changed_by=updater_id
+            )
     db.session.commit()
 
     # -----------------------------
@@ -644,6 +670,7 @@ def get_ticket(ticket_id):
 
     created_by = get_user_info_by_id(ticket.user_id) if ticket.user_id else None
 
+    # --- Assignments (Current state)
     assignments = TicketAssignment.query.filter_by(ticket_id=ticket.id).all()
     assignees = []
     for a in assignments:
@@ -657,10 +684,31 @@ def get_ticket(ticket_id):
             "assigned_at": a.assigned_at
         })
 
+    # --- Assignment Logs (History)
+    assignment_logs = []
+    for log in TicketAssignmentLog.query.filter_by(ticket_id=ticket.id).order_by(TicketAssignmentLog.changed_at.desc()).all():
+        old_user_info = get_user_info_by_id(log.old_assign_to) if log.old_assign_to else None
+        new_user_info = get_user_info_by_id(log.new_assign_to) if log.new_assign_to else None
+        changed_by_info = get_user_info_by_id(log.changed_by) if log.changed_by else None
+
+        assignment_logs.append({
+            "old_assign_to": log.old_assign_to,
+            "old_assign_to_username": old_user_info["username"] if old_user_info else None,
+            "new_assign_to": log.new_assign_to,
+            "new_assign_to_username": new_user_info["username"] if new_user_info else None,
+            "changed_by": log.changed_by,
+            "changed_by_username": changed_by_info["username"] if changed_by_info else None,
+            "changed_at": log.changed_at
+        })
+
+    # --- Files
     files = [{"name": f.file_name, "url": f.file_url}
              for f in TicketFile.query.filter_by(ticket_id=ticket.id).all()]
+    
+    # --- Tags
     tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=ticket.id).all()]
 
+    # --- Comments
     comments = []
     for c in TicketComment.query.filter_by(ticket_id=ticket.id).all():
         u_info = get_user_info_by_id(c.user_id) if c.user_id else None
@@ -671,6 +719,7 @@ def get_ticket(ticket_id):
             "created_at": c.created_at
         })
 
+    # --- Followups
     followups = []
     for f in TicketFollowUp.query.filter_by(ticket_id=ticket.id).all():
         u_info = get_user_info_by_id(f.user_id)
@@ -683,6 +732,7 @@ def get_ticket(ticket_id):
             "created_at": f.created_at
         })
 
+    # --- Category
     category = None
     if getattr(ticket, "category_id", None):
         cat = Category.query.get(ticket.category_id)
@@ -693,7 +743,7 @@ def get_ticket(ticket_id):
                 "is_active": cat.is_active
             }
 
-    # ✅ Status Logs
+    # --- Status Logs
     status_logs = []
     for log in TicketStatusLog.query.filter_by(ticket_id=ticket.id).order_by(TicketStatusLog.changed_at.desc()).all():
         u_info = get_user_info_by_id(log.changed_by)
@@ -705,6 +755,7 @@ def get_ticket(ticket_id):
             "changed_at": log.changed_at
         })
 
+    # --- Final Response
     result = {
         "id": ticket.id,
         "title": ticket.title,
@@ -716,6 +767,7 @@ def get_ticket(ticket_id):
         "completed_at": ticket.completed_at,
         "created_by": created_by,
         "assignees": assignees,
+        "assignment_logs": assignment_logs,   # ✅ NEW
         "files": files,
         "tags": tags,
         "comments": comments,
@@ -725,7 +777,6 @@ def get_ticket(ticket_id):
     }
 
     return jsonify(result)
-
 
 # ─────────────────────────────────────────────
 # Add Ticket Activity Comment, Tags 

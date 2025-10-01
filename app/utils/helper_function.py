@@ -7,7 +7,7 @@ from aiohttp import BasicAuth
 import asyncio
 import os
 import requests
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog
 
 
 # ─── S3 Config ──────────────────────────────────────────────
@@ -111,6 +111,21 @@ def update_ticket_status(ticket_id, new_status, user_id):
     db.session.add(log)
     db.session.commit()
     return ticket
+
+def update_ticket_assignment_log(ticket_id, old_assign_to, new_assign_to, changed_by):
+    ticket = Ticket.query.get(ticket_id)
+    if not ticket:
+        return None
+
+    log = TicketAssignmentLog(
+        ticket_id=ticket.id,
+        old_assign_to=old_assign_to,
+        new_assign_to=new_assign_to,
+        changed_by=changed_by
+    )
+    db.session.add(log)
+    return log
+
 
 
 

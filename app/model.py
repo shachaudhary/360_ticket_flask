@@ -41,6 +41,15 @@ class TicketAssignment(db.Model):
     def __repr__(self):
         return f"<TicketAssignment Ticket={self.ticket_id} → assign_to={self.assign_to}>"
 
+class TicketAssignmentLog(db.Model):
+    __tablename__ = "ticket_assignment_log"
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_id = db.Column(db.Integer, db.ForeignKey("ticket.id"), nullable=False)
+    old_assign_to = db.Column(db.Integer, nullable=True)
+    new_assign_to = db.Column(db.Integer, nullable=False)
+    changed_by = db.Column(db.Integer, nullable=False)
+    changed_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 class TicketFile(db.Model):
