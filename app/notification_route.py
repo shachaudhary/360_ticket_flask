@@ -35,6 +35,8 @@ def create_notification(ticket_id, receiver_id, sender_id, notification_type, me
 
 
 @notification_bp.route("/notifications", methods=["GET"])
+@require_api_key
+@validate_token
 def get_notifications():
     receiver_id = request.args.get("user_id", type=int)  # 👈 param ab bhi user_id hi rahega
     page = request.args.get("page", 1, type=int)
@@ -103,6 +105,8 @@ def get_notifications():
 # Delete Single Notification (User only)
 # ───────────────────────────────
 @notification_bp.route("/notifications/<int:notification_id>", methods=["DELETE"])
+@require_api_key
+@validate_token
 def delete_notification(notification_id):
     user_id = request.args.get("user_id", type=int)
     if not user_id:
@@ -133,6 +137,8 @@ def delete_notification(notification_id):
 # Clear All Notifications (User only)
 # ───────────────────────────────
 @notification_bp.route("/notifications/clear", methods=["DELETE"])
+@require_api_key
+@validate_token
 def clear_notifications():
     user_id = request.args.get("user_id", type=int)
     if not user_id:

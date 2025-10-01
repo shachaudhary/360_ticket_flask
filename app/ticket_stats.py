@@ -3,10 +3,13 @@ from sqlalchemy import func, and_
 from datetime import datetime, timedelta, date
 from app import db
 from app.model import Ticket, Category, TicketFollowUp
+from app.dashboard_routes import require_api_key, validate_token
 
 stats_bp = Blueprint("stats", __name__)
 
 @stats_bp.route("/tickets/stats", methods=["GET"])
+@require_api_key
+@validate_token
 def get_ticket_stats():
     # 1️⃣ Total tickets
     total_tickets = db.session.query(func.count(Ticket.id)).scalar() or 0

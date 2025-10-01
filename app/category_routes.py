@@ -9,6 +9,8 @@ category_bp = Blueprint("category_bp", __name__)
 # ───────────────────────────────
 # Get all categories (default: only active)
 @category_bp.route("/category", methods=["GET"])
+@require_api_key
+@validate_token
 def get_categories():
     include_inactive = request.args.get("include_inactive", "false").lower() == "true"
 
@@ -36,6 +38,8 @@ def get_categories():
 # ───────────────────────────────
 # Get single category
 @category_bp.route("/category/<int:category_id>", methods=["GET"])
+@require_api_key
+@validate_token
 def get_category(category_id):
     category = Category.query.get(category_id)
     if not category:
@@ -55,6 +59,8 @@ def get_category(category_id):
 # ───────────────────────────────
 # Create category
 @category_bp.route("/category", methods=["POST"])
+@require_api_key
+@validate_token
 def create_category():
     data = request.get_json()
     name = data.get("name")
@@ -82,6 +88,8 @@ def create_category():
 # ───────────────────────────────
 # Update category
 @category_bp.route("/category/<int:category_id>", methods=["PATCH"])
+@require_api_key
+@validate_token
 def update_category(category_id):
     category = Category.query.get(category_id)
     if not category:
@@ -122,6 +130,8 @@ def update_category(category_id):
 # ───────────────────────────────
 # Enable/Disable category (quick toggle)
 @category_bp.route("/category/<int:category_id>/status", methods=["PATCH"])
+@require_api_key
+@validate_token
 def toggle_category_status(category_id):
     category = Category.query.get(category_id)
     if not category:
@@ -148,6 +158,8 @@ def toggle_category_status(category_id):
 # ───────────────────────────────
 # Delete category (hard delete)
 @category_bp.route("/category/<int:category_id>", methods=["DELETE"])
+@require_api_key
+@validate_token
 def delete_category(category_id):
     category = Category.query.get(category_id)
     if not category:
