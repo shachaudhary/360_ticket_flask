@@ -202,11 +202,9 @@ def update_ticket(ticket_id):
     if "assign_to" in data:
         new_assign_to = int(data["assign_to"])
         assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
-
         old_assign_to = assignment.assign_to if assignment else None
         if old_assign_to != new_assign_to:
             updated_fields.append(("assign_to", old_assign_to, new_assign_to))
-
             if assignment:
                 assignment.assign_to = new_assign_to
                 assignment.assign_by = updater_id
@@ -217,14 +215,9 @@ def update_ticket(ticket_id):
                     assign_by=updater_id
                 )
                 db.session.add(assignment)
+            # ✅ Save assignment log
+            update_ticket_assignment_log(ticket.id, old_assign_to, new_assign_to, updater_id)
 
-            # ✅ Log assignment change
-            update_ticket_assignment_log(
-                ticket_id=ticket.id,
-                old_assign_to=old_assign_to,
-                new_assign_to=new_assign_to,
-                changed_by=updater_id
-            )
     db.session.commit()
 
     # -----------------------------
