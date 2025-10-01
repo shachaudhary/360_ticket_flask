@@ -33,6 +33,10 @@ def require_api_key(f):
 # -------------------------------------------------------------------
 # Decorator to validate Bearer Token via Auth System
 # -------------------------------------------------------------------
+from functools import wraps
+from flask import request, jsonify, g
+import requests
+
 def validate_token(func):
     @wraps(func)
     def decorated_function(*args, **kwargs):
@@ -46,21 +50,22 @@ def validate_token(func):
         # URL of the Auth system's validate_token API
         auth_system_url = "https://api.dental360grp.com/validate_token"
 
-        # Send the token to the Auth system for validation
         try:
-            response = requests.get(auth_system_url, headers={"Authorization": f"Bearer {bearer_token}"})
+            response = requests.get(
+                auth_system_url,
+                headers={"Authorization": f"Bearer {bearer_token}"}
+            )
 
+            # ✅ Always return actual response from Auth system
             if response.status_code == 200:
-                # ✅ If the token is valid, attach the user info to g
                 g.user = response.json().get("user")
-                return func(*args, **kwargs)
-            else:
-                # ❌ If the token is invalid, return the error from the Auth system
-                return jsonify({"error": response.json().get('error', 'Token validation failed')}), 403
+            return jsonify(response.json()), response.status_code
+
         except requests.exceptions.RequestException as e:
             return jsonify({"error": f"Error connecting to Auth system: {str(e)}"}), 500
 
     return decorated_function
+
 
 
 # -------------------------------------------------------------------
