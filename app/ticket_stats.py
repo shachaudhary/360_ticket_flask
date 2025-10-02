@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from sqlalchemy import func, and_
 from datetime import datetime, timedelta, date
 from app import db
@@ -7,74 +7,103 @@ from app.dashboard_routes import require_api_key, validate_token
 
 stats_bp = Blueprint("stats", __name__)
 
+TIMEFRAME_PRESETS = {
+    "today":       0,
+    "yesterday":   1,
+    "last_7_days": 7,
+    "last_14_days":14,
+    "last_30_days":30,
+    "last_60_days":60,
+    "last_90_days":90,
+    "last_1_year":365,
+}
+
 @stats_bp.route("/tickets/stats", methods=["GET"])
-@require_api_key
 @validate_token
+@require_api_key
 def get_ticket_stats():
+    # 🔹 Query params
+    timeframe = request.args.get("timeframe")
+    clinic_id = request.args.get("clinic_id", type=int)
+
+    # 🔹 Base query
+    query = Ticket.query
+
+    # 🔹 Filter by clinic_id
+    if clinic_id:
+        query = query.filter(Ticket.clinic_id == clinic_id)
+
+    # 🔹 Filter by timeframe
+    if timeframe in TIMEFRAME_PRESETS:
+        days = TIMEFRAME_PRESETS[timeframe]
+        if timeframe == "today":
+            start_date = date.today()
+            query = query.filter(func.date(Ticket.created_at) == start_date)
+        elif timeframe == "yesterday":
+            yest = date.today() - timedelta(days=1)
+            query = query.filter(func.date(Ticket.created_at) == yest)
+        else:
+            start_date = datetime.utcnow() - timedelta(days=days)
+            query = query.filter(Ticket.created_at >= start_date)
+
     # 1️⃣ Total tickets
-    total_tickets = db.session.query(func.count(Ticket.id)).scalar() or 0
+    total_tickets = query.count() or 0
 
     # 2️⃣ Status wise count
-    status_counts = db.session.query(
-        Ticket.status, func.count(Ticket.id)
-    ).group_by(Ticket.status).all()
+    status_counts = (
+        query.with_entities(Ticket.status, func.count(Ticket.id))
+        .group_by(Ticket.status)
+        .all()
+    )
     raw_status = {status: count for status, count in status_counts}
-
-    # Ensure all statuses exist with 0 if missing
     status_data = {
-        "Completed": raw_status.get("Completed", 0),
-        "In Progress": raw_status.get("In Progress", 0),
+        "Completed": raw_status.get("completed", 0),
+        "In Progress": raw_status.get("in_progress", 0),
         "Pending": raw_status.get("Pending", 0)
     }
 
-    completed_count = status_data["Completed"]
-    in_progress_count = status_data["In Progress"]
-    pending_count = status_data["Pending"]
-
     # 3️⃣ Priority wise count
-    priority_counts = db.session.query(
-        Ticket.priority, func.count(Ticket.id)
-    ).group_by(Ticket.priority).all()
+    priority_counts = (
+        query.with_entities(Ticket.priority, func.count(Ticket.id))
+        .group_by(Ticket.priority)
+        .all()
+    )
     raw_priority = {priority: count for priority, count in priority_counts if priority}
-
-    # Define standard priorities
-    priorities = ["High", "Medium", "Low"]
+    priorities = ["High", "Urgent", "Low"]
     priority_data = {p: raw_priority.get(p, 0) for p in priorities}
 
     # 4️⃣ Category wise count
-    category_counts = db.session.query(
-        Category.name, func.count(Ticket.id)
-    ).join(Category, Ticket.category_id == Category.id).group_by(Category.name).all()
+    category_counts = (
+        query.join(Category, Ticket.category_id == Category.id)
+        .with_entities(Category.name, func.count(Ticket.id))
+        .group_by(Category.name)
+        .all()
+    )
     raw_category = {cat: count for cat, count in category_counts}
-
-    # Ensure every category in DB schema appears
     all_categories = [c.name for c in Category.query.all()]
     category_data = {c: raw_category.get(c, 0) for c in all_categories}
 
-    # 5️⃣ Completed tickets in last 30 days
+    # 5️⃣ Completed tickets in last 30 days (with filters applied)
     last_30_days = datetime.utcnow() - timedelta(days=30)
-    completed_last_30 = db.session.query(func.count(Ticket.id)).filter(
-        Ticket.status == "Completed",
+    completed_last_30 = query.filter(
+        Ticket.status == "completed",
         Ticket.completed_at >= last_30_days
-    ).scalar() or 0
+    ).count() or 0
 
-    # 6️⃣ Total followups
-    followup_counts = db.session.query(
-        func.count(TicketFollowUp.id)
-    ).scalar() or 0
+    # 6️⃣ Total followups (apply clinic_id filter if passed)
+    followup_query = TicketFollowUp.query
+    if clinic_id:
+        followup_query = followup_query.join(Ticket).filter(Ticket.clinic_id == clinic_id)
+    followup_counts = followup_query.count() or 0
 
-    # 7️⃣ Daily tickets count (last 7 days with zeros if missing)
+    # 7️⃣ Daily tickets count (last 7 days)
     today = date.today()
     raw_daily = dict(
-        db.session.query(
-            func.date(Ticket.created_at).label("date"),
-            func.count(Ticket.id).label("count")
-        )
+        query.with_entities(func.date(Ticket.created_at), func.count(Ticket.id))
         .filter(Ticket.created_at >= today - timedelta(days=7))
         .group_by(func.date(Ticket.created_at))
         .all()
     )
-
     daily_stats = []
     for i in range(7):
         d = today - timedelta(days=i)
@@ -84,15 +113,13 @@ def get_ticket_stats():
         })
     daily_stats.reverse()
 
-    # 8️⃣ Overdue tickets (not completed & past due_date)
-    overdue_tickets = (
-        Ticket.query.filter(
-            and_(
-                Ticket.status != "Completed",
-                Ticket.due_date < today
-            )
-        ).all()
-    )
+    # 8️⃣ Overdue tickets
+    overdue_tickets = query.filter(
+        and_(
+            Ticket.status != "completed",
+            Ticket.due_date < today
+        )
+    ).all()
     overdue_list = [
         {
             "id": t.id,
@@ -108,9 +135,6 @@ def get_ticket_stats():
     return jsonify({
         "total_tickets": total_tickets,
         "by_status": status_data,
-        "completed_count": completed_count,
-        "in_progress_count": in_progress_count,
-        "pending_count": pending_count,
         "by_priority": priority_data,
         "by_category": category_data,
         "completed_last_30_days": completed_last_30,
