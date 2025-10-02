@@ -516,7 +516,7 @@ def assign_ticket():
 # Get All Tickets (with Pagination)
 @ticket_bp.route("/tickets", methods=["GET"])
 @require_api_key
-# @validate_token
+@validate_token
 def get_tickets():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
@@ -663,7 +663,7 @@ def get_tickets():
 # Get Ticket with all details
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["GET"])
 @require_api_key
-# @validate_token
+@validate_token
 def get_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:

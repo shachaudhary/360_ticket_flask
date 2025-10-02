@@ -40,14 +40,12 @@ import requests
 def validate_token(func):
     @wraps(func)
     def decorated_function(*args, **kwargs):
-        # Get the Bearer token from the request header
         auth_header = request.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
             return jsonify({"error": "Bearer token is required in Authorization header."}), 401
 
         bearer_token = auth_header.split('Bearer ')[1]
 
-        # URL of the Auth system's validate_token API
         auth_system_url = "https://api.dental360grp.com/validate_token"
 
         try:
@@ -56,16 +54,16 @@ def validate_token(func):
                 headers={"Authorization": f"Bearer {bearer_token}"}
             )
 
-            # ✅ Always return actual response from Auth system
             if response.status_code == 200:
                 g.user = response.json().get("user")
-            return jsonify(response.json()), response.status_code
+                return func(*args, **kwargs)  # ✅ call original function
+            else:
+                return jsonify(response.json()), response.status_code
 
         except requests.exceptions.RequestException as e:
             return jsonify({"error": f"Error connecting to Auth system: {str(e)}"}), 500
 
     return decorated_function
-
 
 
 # -------------------------------------------------------------------
