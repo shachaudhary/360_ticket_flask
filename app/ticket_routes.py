@@ -25,7 +25,7 @@ ticket_bp = Blueprint("tickets", __name__, url_prefix="/api/tickets")
 # Create Ticket with files and @username tags
 @ticket_bp.route("/ticket", methods=["POST"])
 @require_api_key
-@validate_token
+# @validate_token
 def create_ticket():
     data = request.form
 
@@ -147,7 +147,7 @@ def create_ticket():
 # ─────────────────────────────────────────────
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["PATCH"])
 @require_api_key
-@validate_token
+# @validate_token
 def update_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -448,7 +448,7 @@ def update_ticket(ticket_id):
 # Assign Ticket
 @ticket_bp.route("/assign", methods=["POST"])
 @require_api_key
-@validate_token
+# @validate_token
 def assign_ticket():
     data = request.get_json()
 
@@ -516,7 +516,7 @@ def assign_ticket():
 # Get All Tickets (with Pagination)
 @ticket_bp.route("/tickets", methods=["GET"])
 @require_api_key
-@validate_token
+# @validate_token
 def get_tickets():
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
@@ -663,7 +663,7 @@ def get_tickets():
 # Get Ticket with all details
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["GET"])
 @require_api_key
-@validate_token
+# @validate_token
 def get_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -783,7 +783,7 @@ def get_ticket(ticket_id):
 # Add Ticket Activity Comment, Tags 
 @ticket_bp.route("/ticket/activity/<int:ticket_id>", methods=["POST"])
 @require_api_key
-@validate_token
+# @validate_token
 def add_ticket_activity(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -902,7 +902,7 @@ def add_ticket_activity(ticket_id):
 # Delete Ticket
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["DELETE"])
 @require_api_key
-@validate_token
+# @validate_token
 def delete_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -916,7 +916,7 @@ def delete_ticket(ticket_id):
 # Filtered Tickets API
 @ticket_bp.route("/tickets/filter", methods=["GET"])
 @require_api_key
-@validate_token
+# @validate_token
 def filter_tickets():
     user_id = request.args.get("user_id", type=int)
     if not user_id:

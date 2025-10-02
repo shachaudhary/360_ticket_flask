@@ -8,7 +8,7 @@ from app.dashboard_routes import require_api_key, validate_token
 stats_bp = Blueprint("stats", __name__)
 
 @stats_bp.route("/tickets/stats", methods=["GET"])
-@require_api_key
+# @require_api_key
 @validate_token
 def get_ticket_stats():
     # 1️⃣ Total tickets
