@@ -711,7 +711,7 @@ def get_ticket(ticket_id):
 
     # --- Comments
     comments = []
-    for c in TicketComment.query.filter_by(ticket_id=ticket.id).all():
+    for c in TicketComment.query.filter_by(ticket_id=ticket.id).order_by(TicketComment.created_at.desc()).all():
         u_info = get_user_info_by_id(c.user_id) if c.user_id else None
         comments.append({
             "user_id": c.user_id,
