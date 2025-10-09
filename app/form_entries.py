@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime
 from app import db
-from app.model import FormEntry, FormFieldValue, FormEmailRecipient, FormType
+from app.model import FormEntry, FormFieldValue, FormEmailRecipient, FormType, FormTypeUserNoti, FormEmailLog
 from app.utils.email_templete import send_email, get_user_info_by_id, generate_email_template
 from app.dashboard_routes import require_api_key, validate_token
 
@@ -136,11 +136,15 @@ MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY")
 # ==============================
 # 🔹 Main API Endpoint
 # ==============================
+# ================================================================
+# 🟢 CREATE FORM ENTRY + AUTO EMAIL TO MAPPED USERS
+# ================================================================
 @form_entries_blueprint.route("/form_entries/field_values", methods=["POST"])
 def create_form_entry_with_field_values():
     """
     Create a new FormEntry using form_type_id only,
-    save field values, and send notification emails.
+    save field values, and send notification emails
+    to all users mapped in FormTypeUserNoti.
     """
     try:
         data = request.get_json() or {}
@@ -173,42 +177,60 @@ def create_form_entry_with_field_values():
 
         # ✅ Add field values
         for field in field_values:
-            field_name = field.get("field_name")
-            field_value = field.get("field_value")
-            if not field_name:
-                continue
-            db.session.add(FormFieldValue(
-                form_entry_id=new_entry.id,
-                field_name=field_name,
-                field_value=field_value
-            ))
+            if field.get("field_name"):
+                db.session.add(FormFieldValue(
+                    form_entry_id=new_entry.id,
+                    field_name=field["field_name"],
+                    field_value=field.get("field_value", "")
+                ))
         db.session.commit()
 
-        # ✅ Fetch email recipients by form_type_id
-        recipients = FormEmailRecipient.query.filter_by(form_type_id=form_type_id).all()
-        recipient_emails = [r.email for r in recipients]
+        # ✅ Get users mapped to this form_type_id
+        mapped_users = FormTypeUserNoti.query.filter_by(form_type_id=form_type_id).all()
+        if not mapped_users:
+            return jsonify({
+                "message": "Form entry created successfully but no mapped users found.",
+                "form_entry_id": new_entry.id
+            }), 201
 
-        # ✅ Email notification
-        subject = f"New {ft.display_name or ft.name} Form Submitted"
+        # ✅ Compose email
+        subject = f"New {ft.name.replace('_', ' ').title()} Form Submitted"
         body_lines = [
-            f"A new <b>{ft.display_name or ft.name}</b> form has been submitted on the Dental360 portal.",
+            f"A new <b>{ft.name.replace('_', ' ').title()}</b> form has been submitted on the Dental360 portal.",
             "<br>Please review the form in your Dental360 dashboard."
         ]
         body_html = generate_email_template(subject, body_lines)
 
         email_status = []
-        if recipient_emails:
-            for email in recipient_emails:
-                sent = send_email(email, subject, body_html)
-                email_status.append({"email": email, "status": "sent" if sent else "failed"})
-        else:
-            email_status.append({"status": "no recipients found"})
+        for mapping in mapped_users:
+            user_info = get_user_info_by_id(mapping.user_id)
+            if not user_info or not user_info.get("email"):
+                continue
+
+            email = user_info["email"]
+            sent = send_email(email, subject, body_html)
+            status = "sent" if sent else "failed"
+
+            # ✅ Log in FormEmailLog
+            db.session.add(FormEmailLog(
+                form_entry_id=new_entry.id,
+                form_type_id=form_type_id,
+                sender_id=submitted_by_id,
+                email_type="form_submission",
+                sender_email=user_info.get("email"),
+                receiver_id=mapping.user_id,
+                message=f"Form submitted for {ft.name}",
+                status=status
+            ))
+            email_status.append({"email": email, "status": status})
+
+        db.session.commit()
 
         return jsonify({
             "message": "Form entry created successfully and notifications sent.",
             "form_entry_id": new_entry.id,
             "form_type_id": form_type_id,
-            "recipients": recipient_emails,
+            # "recipients": [e["email"] for e in email_status],
             "email_status": email_status
         }), 201
 
@@ -218,14 +240,16 @@ def create_form_entry_with_field_values():
         return jsonify({"error": str(e)}), 500
 
 
-# =====================================
-# 🟢 STEP 4 — Update Field Values
-# =====================================
+
+# ================================================================
+# 🟠 UPDATE FORM ENTRY + EMAIL NOTIFY MAPPED USERS
+# ================================================================
 @form_entries_blueprint.route("/form_entries/field_values/<int:form_entry_id>", methods=["PUT"])
 def update_field_values(form_entry_id):
     """
-    Update an existing FormEntry using form_type_id only,
-    update field values, and send email notifications.
+    Update an existing FormEntry (using form_type_id only),
+    update field values, and send email notifications
+    to all mapped users in FormTypeUserNoti.
     """
     try:
         data = request.get_json() or {}
@@ -244,23 +268,13 @@ def update_field_values(form_entry_id):
         if not form_entry:
             return jsonify({"error": "Form entry not found"}), 404
 
-        # ✅ Resolve FormType (auto-handle string)
-        ft = None
-        if isinstance(form_type_id, str):
-            ft = FormType.query.filter_by(name=form_type_id).first()
-            if not ft:
-                return jsonify({"error": f"Invalid form_type name '{form_type_id}'"}), 404
-            form_type_id = ft.id
-        elif form_type_id:
-            ft = FormType.query.get(form_type_id)
-            if not ft:
-                return jsonify({"error": "Invalid form_type_id"}), 404
-        else:
-            ft = FormType.query.get(form_entry.form_type_id)
-            form_type_id = ft.id if ft else form_entry.form_type_id
+        # ✅ Resolve FormType
+        ft = FormType.query.get(form_type_id or form_entry.form_type_id)
+        if not ft:
+            return jsonify({"error": "Invalid form_type_id"}), 404
 
         # ✅ Update metadata
-        form_entry.form_type_id = form_type_id
+        form_entry.form_type_id = form_type_id or form_entry.form_type_id
         if submitted_by_id:
             form_entry.submitted_by_id = submitted_by_id
         if clinic_id:
@@ -270,56 +284,69 @@ def update_field_values(form_entry_id):
 
         db.session.commit()
 
-        # ✅ Update / insert field values
+        # ✅ Update or insert field values
         for field in field_values:
             field_name = field.get("field_name")
-            field_value = field.get("field_value")
             if not field_name:
                 continue
 
             existing_field = FormFieldValue.query.filter_by(
-                form_entry_id=form_entry.id, field_name=field_name
+                form_entry_id=form_entry.id,
+                field_name=field_name
             ).first()
 
             if existing_field:
-                existing_field.field_value = field_value
+                existing_field.field_value = field.get("field_value", "")
             else:
                 db.session.add(FormFieldValue(
                     form_entry_id=form_entry.id,
                     field_name=field_name,
-                    field_value=field_value
+                    field_value=field.get("field_value", "")
                 ))
-
         db.session.commit()
 
-        # ✅ Fetch recipients using form_type_id (not name)
-        recipients = FormEmailRecipient.query.filter_by(form_type_id=form_type_id).all()
-        recipient_emails = [r.email for r in recipients]
+        # ✅ Fetch mapped users
+        mapped_users = FormTypeUserNoti.query.filter_by(form_type_id=form_entry.form_type_id).all()
 
-        # ✅ Compose email
-        subject = f"{ft.display_name or ft.name} Form Updated"
+        # ✅ Compose update email
+        subject = f"{ft.name.replace('_', ' ').title()} Form Updated"
         body_lines = [
-            f"The <b>{ft.display_name or ft.name}</b> form (ID: {form_entry.id}) has been updated.",
+            f"The <b>{ft.name.replace('_', ' ').title()}</b> form (ID: {form_entry.id}) has been updated.",
             "<br>Please review the changes in your Dental360 dashboard."
         ]
         body_html = generate_email_template(subject, body_lines)
 
-        # ✅ Send notification emails
         email_status = []
-        if recipient_emails:
-            for email in recipient_emails:
-                sent = send_email(email, subject, body_html)
-                email_status.append({"email": email, "status": "sent" if sent else "failed"})
-        else:
-            email_status.append({"status": "no recipients found"})
+        for mapping in mapped_users:
+            user_info = get_user_info_by_id(mapping.user_id)
+            if not user_info or not user_info.get("email"):
+                continue
+
+            email = user_info["email"]
+            sent = send_email(email, subject, body_html)
+            status = "sent" if sent else "failed"
+
+            # ✅ Log email
+            db.session.add(FormEmailLog(
+                form_entry_id=form_entry.id,
+                form_type_id=form_entry.form_type_id,
+                sender_id=submitted_by_id,
+                email_type="form_update",
+                sender_email=user_info.get("email"),
+                receiver_id=mapping.user_id,
+                message=f"Form update notification sent for {ft.name}",
+                status=status
+            ))
+            email_status.append({"email": email, "status": status})
+
+        db.session.commit()
 
         return jsonify({
             "message": "Form entry updated successfully and notifications sent.",
             "form_entry_id": form_entry.id,
-            "form_type_id": form_type_id,
-            "form_type_name": ft.name if ft else None,
-            "updated_fields": len(field_values),
-            "recipients": recipient_emails,
+            "form_type_id": form_entry.form_type_id,
+            "form_type_name": ft.name,
+            "recipients": [e["email"] for e in email_status],
             "email_status": email_status
         }), 200
 
@@ -334,26 +361,32 @@ def update_field_values(form_entry_id):
 @form_entries_blueprint.route("/form_entries", methods=["GET"])
 def get_all_form_entries():
     """
-    Fetch all FormEntry records with optional filters:
+    Fetch paginated FormEntry records with optional filters:
     - clinic_id
     - location_id
-    - form_type or form_type_id
-    Joins with form_types manually to include form type name & description.
+    - form_type_id
+    - form_type (by name)
+    - submitted_by_id
+    Includes joined FormType info and all field values.
     """
     try:
+        # --- Query params ---
         clinic_id = request.args.get("clinic_id", type=int)
         location_id = request.args.get("location_id", type=int)
-        form_type = request.args.get("form_type")      # form_types.name
+        form_type = request.args.get("form_type")               # string name of form type
         form_type_id = request.args.get("form_type_id", type=int)
+        submitted_by_id = request.args.get("submitted_by_id", type=int)
+        page = request.args.get("page", default=1, type=int)
+        per_page = request.args.get("per_page", default=10, type=int)
 
-        # ✅ Explicit join (no relationship needed)
+        # --- Base query ---
         query = (
             db.session.query(FormEntry, FormType)
             .select_from(FormEntry)
             .join(FormType, FormEntry.form_type_id == FormType.id)
         )
 
-        # ✅ Apply filters
+        # --- Filters ---
         if clinic_id:
             query = query.filter(FormEntry.clinic_id == clinic_id)
         if location_id:
@@ -361,48 +394,55 @@ def get_all_form_entries():
         if form_type_id:
             query = query.filter(FormEntry.form_type_id == form_type_id)
         if form_type:
-            query = query.filter(FormType.name == form_type)
+            query = query.filter(FormType.name.ilike(f"%{form_type}%"))
+        if submitted_by_id:
+            query = query.filter(FormEntry.submitted_by_id == submitted_by_id)
 
-        rows = query.order_by(FormEntry.id.desc()).all()
+        # --- Count total before pagination ---
+        total_count = query.count()
 
+        # --- Pagination ---
+        query = query.order_by(FormEntry.created_at.desc())
+        paginated = query.limit(per_page).offset((page - 1) * per_page).all()
+
+        # --- Build response list ---
         results = []
-        for entry, ft in rows:
-            # ✅ Field values
+        for entry, ft in paginated:
+            # Get all field values for this entry
             field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
             values_list = [
                 {"field_name": fv.field_name, "field_value": fv.field_value}
                 for fv in field_values
             ]
 
-            # ✅ Recipients (still by string form_type name)
-            # recipients = FormEmailRecipient.query.filter_by(form_type=ft.name).all()
-            # recipient_emails = [r.email for r in recipients]
-
-            # ✅ Submitter info
+            # Get submitter info
             submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
 
-            # ✅ Build response
             results.append({
                 "id": entry.id,
                 "form_type_id": entry.form_type_id,
                 "form_type_name": ft.name,
-                "form_type_display_name": ft.display_name,
                 "form_type_description": ft.description,
                 "submitted_by": submitted_user,
                 "clinic_id": entry.clinic_id,
                 "location_id": entry.location_id,
                 "created_at": entry.created_at.isoformat() if entry.created_at else None,
                 "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-                "field_values": values_list,
-                # "recipients": recipient_emails
+                "field_values": values_list
             })
 
-        return jsonify({"total": len(results), "form_entries": results}), 200
+        # --- Return paginated result ---
+        return jsonify({
+            "page": page,
+            "per_page": per_page,
+            "total": total_count,
+            "total_pages": (total_count + per_page - 1) // per_page,
+            "form_entries": results
+        }), 200
 
     except Exception as e:
         print(f"❌ Error in get_all_form_entries: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # # =====================================
 # # 🔵 GET BY ID
@@ -450,7 +490,6 @@ def get_form_entry_by_id(form_entry_id):
             "id": entry.id,
             "form_type_id": entry.form_type_id,
             "form_type_name": ft.name,
-            "form_type_display_name": ft.display_name,
             "form_type_description": ft.description,
             "submitted_by": submitted_user,
             "clinic_id": entry.clinic_id,
@@ -576,33 +615,41 @@ def get_all_form_email_recipients():
 
 
 
+# =====================================
+# 🟢 CREATE FORM TYPE + USER MAP
+# =====================================
 @form_entries_blueprint.route("/form_types", methods=["POST"])
 def create_form_type():
-    """Create a new form type"""
+    """Create a new form type with optional user mappings."""
     try:
         data = request.get_json() or {}
         name = data.get("name")
-        # display_name = data.get("display_name")
         description = data.get("description")
+        user_ids = data.get("user_ids", [])  # optional list of user IDs
 
         if not name:
             return jsonify({"error": "name is required"}), 400
 
-        # Check if already exists
-        existing = FormType.query.filter_by(name=name).first()
-        if existing:
+        # Check for duplicates
+        if FormType.query.filter_by(name=name).first():
             return jsonify({"error": "Form type already exists"}), 409
 
+        # Create FormType
         form_type = FormType(name=name, description=description)
         db.session.add(form_type)
+        db.session.commit()
+
+        # Add user mappings
+        for uid in user_ids:
+            db.session.add(FormTypeUserNoti(form_type_id=form_type.id, user_id=uid))
         db.session.commit()
 
         return jsonify({
             "message": "Form type created successfully.",
             "id": form_type.id,
             "name": form_type.name,
-            # "display_name": form_type.display_name,
-            "description": form_type.description
+            "description": form_type.description,
+            "user_ids": user_ids
         }), 201
 
     except Exception as e:
@@ -610,21 +657,32 @@ def create_form_type():
         print(f"❌ Error in create_form_type: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+
+# =====================================
+# 🔵 GET ALL FORM TYPES (with users)
+# =====================================
 @form_entries_blueprint.route("/form_types", methods=["GET"])
 def get_all_form_types():
-    """Fetch all form types"""
+    """Fetch all form types with assigned users."""
     try:
         form_types = FormType.query.order_by(FormType.id.desc()).all()
-        results = [
-            {
+        results = []
+
+        for ft in form_types:
+            mappings = FormTypeUserNoti.query.filter_by(form_type_id=ft.id).all()
+            user_ids = [m.user_id for m in mappings]
+            users = [get_user_info_by_id(uid) for uid in user_ids if uid]
+
+            results.append({
                 "id": ft.id,
                 "name": ft.name,
-                # "display_name": ft.display_name,
                 "description": ft.description,
-                "created_at": ft.created_at.isoformat() if ft.created_at else None
-            }
-            for ft in form_types
-        ]
+                "created_at": ft.created_at.isoformat() if ft.created_at else None,
+                "user_ids": user_ids,
+                "users": users
+            })
+
         return jsonify({
             "total": len(results),
             "form_types": results
@@ -633,54 +691,74 @@ def get_all_form_types():
     except Exception as e:
         print(f"❌ Error in get_all_form_types: {e}")
         return jsonify({"error": str(e)}), 500
-    
+
+
+
+# =====================================
+# 🔵 GET FORM TYPE BY ID (with users)
+# =====================================
 @form_entries_blueprint.route("/form_types/<int:type_id>", methods=["GET"])
 def get_form_type_by_id(type_id):
-    """Fetch a single form type by ID"""
+    """Fetch a single form type with assigned users."""
     try:
-        form_type = FormType.query.get(type_id)
-        if not form_type:
+        ft = FormType.query.get(type_id)
+        if not ft:
             return jsonify({"error": "Form type not found"}), 404
 
+        mappings = FormTypeUserNoti.query.filter_by(form_type_id=ft.id).all()
+        user_ids = [m.user_id for m in mappings]
+        users = [get_user_info_by_id(uid) for uid in user_ids if uid]
+
         return jsonify({
-            "id": form_type.id,
-            "name": form_type.name,
-            # "display_name": form_type.display_name,
-            "description": form_type.description,
-            "created_at": form_type.created_at.isoformat() if form_type.created_at else None
+            "id": ft.id,
+            "name": ft.name,
+            "description": ft.description,
+            "created_at": ft.created_at.isoformat() if ft.created_at else None,
+            "user_ids": user_ids,
+            "users": users
         }), 200
 
     except Exception as e:
         print(f"❌ Error in get_form_type_by_id: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+
+# =====================================
+# 🟠 UPDATE FORM TYPE + USERS
+# =====================================
 @form_entries_blueprint.route("/form_types/<int:type_id>", methods=["PUT"])
 def update_form_type(type_id):
-    """Update a form type"""
+    """Update a form type and its user mappings."""
     try:
         data = request.get_json() or {}
-        form_type = FormType.query.get(type_id)
-
-        if not form_type:
+        ft = FormType.query.get(type_id)
+        if not ft:
             return jsonify({"error": "Form type not found"}), 404
 
         new_name = data.get("name")
-        if new_name and new_name != form_type.name:
+        if new_name and new_name != ft.name:
             if FormType.query.filter_by(name=new_name).first():
                 return jsonify({"error": "Form type name already exists"}), 409
-            form_type.name = new_name
+            ft.name = new_name
 
-        form_type.display_name = data.get("display_name", form_type.display_name)
-        form_type.description = data.get("description", form_type.description)
-
+        ft.description = data.get("description", ft.description)
         db.session.commit()
+
+        # Update user mappings
+        new_user_ids = data.get("user_ids", [])
+        if isinstance(new_user_ids, list):
+            FormTypeUserNoti.query.filter_by(form_type_id=ft.id).delete()
+            for uid in new_user_ids:
+                db.session.add(FormTypeUserNoti(form_type_id=ft.id, user_id=uid))
+            db.session.commit()
 
         return jsonify({
             "message": "Form type updated successfully.",
-            "id": form_type.id,
-            "name": form_type.name,
-            "display_name": form_type.display_name,
-            "description": form_type.description
+            "id": ft.id,
+            "name": ft.name,
+            "description": ft.description,
+            "user_ids": new_user_ids
         }), 200
 
     except Exception as e:
@@ -688,18 +766,24 @@ def update_form_type(type_id):
         print(f"❌ Error in update_form_type: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+
+# =====================================
+# 🔴 DELETE FORM TYPE + USER MAPS
+# =====================================
 @form_entries_blueprint.route("/form_types/<int:type_id>", methods=["DELETE"])
 def delete_form_type(type_id):
-    """Delete a form type"""
+    """Delete a form type and its user mappings."""
     try:
-        form_type = FormType.query.get(type_id)
-        if not form_type:
+        ft = FormType.query.get(type_id)
+        if not ft:
             return jsonify({"error": "Form type not found"}), 404
 
-        db.session.delete(form_type)
+        FormTypeUserNoti.query.filter_by(form_type_id=ft.id).delete()
+        db.session.delete(ft)
         db.session.commit()
 
-        return jsonify({"message": "Form type deleted successfully."}), 200
+        return jsonify({"message": "Form type and user mappings deleted successfully."}), 200
 
     except Exception as e:
         db.session.rollback()

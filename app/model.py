@@ -205,3 +205,42 @@ class FormEmailRecipient(db.Model):
     def __repr__(self):
         return f"<FormEmailRecipient {self.form_type_id } → {self.email}>"
 
+
+
+# =========================================================================
+
+class FormTypeUserNoti(db.Model):
+    """
+    Maps users to specific FormTypes for automatic notifications.
+    """
+    __tablename__ = "form_type_user_noti"
+
+    id = db.Column(db.Integer, primary_key=True)
+    form_type_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FormTypeUserNoti form_type_id={self.form_type_id}, user_id={self.user_id}>"
+
+
+
+class FormEmailLog(db.Model):
+    """
+    Logs every email sent for form notifications.
+    """
+    __tablename__ = "form_email_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    form_entry_id = db.Column(db.Integer)
+    form_type_id = db.Column(db.Integer)
+    sender_id = db.Column(db.Integer)                 # user who triggered or submitted
+    email_type = db.Column(db.String(255))            # e.g. "form_submission", "form_update"
+    sender_email = db.Column(db.String(255))
+    receiver_id = db.Column(db.Integer)               # 👈 fix spelling (was reciver_id)
+    message = db.Column(db.Text)
+    status = db.Column(db.String(100))                # "sent" or "failed"
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FormEmailLog from={self.sender_email} to={self.receiver_id} ({self.status})>"
