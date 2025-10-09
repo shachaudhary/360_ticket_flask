@@ -375,8 +375,8 @@ def get_all_form_entries():
             ]
 
             # ✅ Recipients (still by string form_type name)
-            recipients = FormEmailRecipient.query.filter_by(form_type=ft.name).all()
-            recipient_emails = [r.email for r in recipients]
+            # recipients = FormEmailRecipient.query.filter_by(form_type=ft.name).all()
+            # recipient_emails = [r.email for r in recipients]
 
             # ✅ Submitter info
             submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
@@ -394,7 +394,7 @@ def get_all_form_entries():
                 "created_at": entry.created_at.isoformat() if entry.created_at else None,
                 "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
                 "field_values": values_list,
-                "recipients": recipient_emails
+                # "recipients": recipient_emails
             })
 
         return jsonify({"total": len(results), "form_entries": results}), 200
@@ -439,8 +439,8 @@ def get_form_entry_by_id(form_entry_id):
         ]
 
         # ✅ Recipients
-        recipients = FormEmailRecipient.query.filter_by(form_type=ft.name).all()
-        recipient_emails = [r.email for r in recipients]
+        # recipients = FormEmailRecipient.query.filter_by(form_type=ft.name).all()
+        # recipient_emails = [r.email for r in recipients]
 
         # ✅ Submitter info
         submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
@@ -458,7 +458,7 @@ def get_form_entry_by_id(form_entry_id):
             "created_at": entry.created_at.isoformat() if entry.created_at else None,
             "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
             "field_values": values_list,
-            "recipients": recipient_emails
+            # "recipients": recipient_emails
         }), 200
 
     except Exception as e:
