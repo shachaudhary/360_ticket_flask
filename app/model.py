@@ -139,23 +139,40 @@ class TicketStatusLog(db.Model):
 
 
 
+class FormType(db.Model):
+    """
+    Stores master list of available form types (e.g., New Hire, Transfer, Termination)
+    """
+    __tablename__ = "form_types"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), unique=True, nullable=False)  # e.g., new_hire, transfer
+    display_name = db.Column(db.String(255), nullable=True)        # e.g., "New Hire"
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FormType {self.name}>"
 
 class FormEntry(db.Model):
     """
-    Represents a type/entries of form (e.g. New Hire, Transfer, Termination)
+    Represents a type/entries of form (linked to form_types table)
     """
     __tablename__ = "form_entries"
 
     id = db.Column(db.Integer, primary_key=True)
-    form_type = db.Column(db.String(255), nullable=False)  # e.g. "new_hire", "transfer"
-    submitted_by_id = db.Column(db.Integer)  # User who created/submitted this form/Optional
+    form_type_id = db.Column(db.Integer, nullable=False)
+    submitted_by_id = db.Column(db.Integer)
     clinic_id = db.Column(db.Integer)
     location_id = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Relationship
+    # form_type = db.relationship("FormType", backref=db.backref("entries", lazy=True))
+
     def __repr__(self):
-        return f"<FormEntry {self.id} - {self.form_type} ({self.status})>"
+        return f"<FormEntry {self.id} - {self.form_type.name}>"
 
 
 class FormFieldValue(db.Model):
@@ -182,9 +199,9 @@ class FormEmailRecipient(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(255), nullable=False)
-    form_type = db.Column(db.String(255), nullable=False)
+    form_type_id  = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def __repr__(self):
-        return f"<FormEmailRecipient {self.form_type} → {self.email}>"
+        return f"<FormEmailRecipient {self.form_type_id } → {self.email}>"
 
