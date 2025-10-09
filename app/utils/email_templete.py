@@ -354,3 +354,49 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
         args=(user_info["email"], subject, body_html, body_text)
     ).start()
 
+import threading
+
+
+# ===========================
+# ✅ EMAIL UTILITIES
+# ===========================
+
+def generate_email_template(title, body_lines):
+    """
+    Create a clean, minimal HTML card-style email.
+    """
+    date_str = datetime.utcnow().strftime("%B %d, %Y")
+
+    body_html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <title>{title}</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; background-color: #f5f7fa; padding: 40px;">
+      <div style="max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 10px;
+                  box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden;">
+        <div style="background: linear-gradient(135deg, #004AAD, #2BCB6B);
+                    color: white; padding: 16px 24px; font-size: 18px; font-weight: bold;">
+          {title}
+        </div>
+
+        <div style="padding: 24px; color: #333;">
+          <p style="margin: 0 0 10px; color: #555;">{date_str}</p>
+    """
+
+    for line in body_lines:
+        body_html += f"<p style='margin: 10px 0; line-height: 1.6; color: #444;'>{line}</p>"
+
+    body_html += """
+          <hr style="border: none; border-top: 1px solid #eaeaea; margin: 20px 0;" />
+          <p style="font-size: 13px; color: #999;">This is an automated email from Dental360. 
+          Please do not reply directly.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+    """
+    return body_html
+

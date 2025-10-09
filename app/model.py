@@ -136,3 +136,55 @@ class TicketStatusLog(db.Model):
 
     def __repr__(self):
         return f"<TicketStatusLog ticket={self.ticket_id} {self.old_status} → {self.new_status}>"
+
+
+
+
+class FormEntry(db.Model):
+    """
+    Represents a type/entries of form (e.g. New Hire, Transfer, Termination)
+    """
+    __tablename__ = "form_entries"
+
+    id = db.Column(db.Integer, primary_key=True)
+    form_type = db.Column(db.String(255), nullable=False)  # e.g. "new_hire", "transfer"
+    submitted_by_id = db.Column(db.Integer)  # User who created/submitted this form/Optional
+    clinic_id = db.Column(db.Integer)
+    location_id = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FormEntry {self.id} - {self.form_type} ({self.status})>"
+
+
+class FormFieldValue(db.Model):
+    """
+    Stores individual field data (like field_name and value) for each form.
+    """
+    __tablename__ = "form_field_values"
+
+    id = db.Column(db.Integer, primary_key=True)
+    form_entry_id = db.Column(db.Integer)
+    field_name = db.Column(db.String(255))
+    field_value = db.Column(db.Text)
+
+    def __repr__(self):
+        return f"<FormFieldValue {self.field_name}={self.field_value}>"
+
+
+
+class FormEmailRecipient(db.Model):
+    """
+    Stores email recipients for each form type (e.g. new_hire, transfer, termination)
+    """
+    __tablename__ = "form_email_recipients"
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), nullable=False)
+    form_type = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FormEmailRecipient {self.form_type} → {self.email}>"
+
