@@ -340,7 +340,7 @@ def get_all_form_entries():
     - clinic_id
     - location_id
     - form_type
-    Includes related field values and form-type recipients.
+    Includes related field values, recipients, and submitter user info.
     """
     try:
         # Optional query params
@@ -374,11 +374,14 @@ def get_all_form_entries():
             recipients = FormEmailRecipient.query.filter_by(form_type=entry.form_type).all()
             recipient_emails = [r.email for r in recipients]
 
+            # ✅ Get submitter user info
+            submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
+
             # ✅ Build entry JSON
             results.append({
                 "id": entry.id,
                 "form_type": entry.form_type,
-                "submitted_by_id": entry.submitted_by_id,
+                "submitted_by": submitted_user,
                 "clinic_id": entry.clinic_id,
                 "location_id": entry.location_id,
                 "created_at": entry.created_at.isoformat() if entry.created_at else None,
@@ -396,14 +399,15 @@ def get_all_form_entries():
         print(f"❌ Error in get_all_form_entries: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 # # =====================================
 # # 🔵 GET BY ID
 # # =====================================
 @form_entries_blueprint.route("/form_entries/<int:form_entry_id>", methods=["GET"])
 def get_form_entry_by_id(form_entry_id):
     """
-    Fetch a single FormEntry by ID with its field values
-    and email recipients for its form_type.
+    Fetch a single FormEntry by ID with its field values,
+    recipients, and submitter user info.
     """
     try:
         entry = FormEntry.query.get(form_entry_id)
@@ -417,15 +421,17 @@ def get_form_entry_by_id(form_entry_id):
             for fv in field_values
         ]
 
-        # ✅ Get email recipients for this form type
+        # ✅ Get email recipients for this form_type
         recipients = FormEmailRecipient.query.filter_by(form_type=entry.form_type).all()
         recipient_emails = [r.email for r in recipients]
 
-        # ✅ Return response
+        # ✅ Get submitter user info
+        submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
+
         return jsonify({
             "id": entry.id,
             "form_type": entry.form_type,
-            "submitted_by_id": entry.submitted_by_id,
+            "submitted_by": submitted_user,
             "clinic_id": entry.clinic_id,
             "location_id": entry.location_id,
             "created_at": entry.created_at.isoformat() if entry.created_at else None,
