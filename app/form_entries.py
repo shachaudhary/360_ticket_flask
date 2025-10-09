@@ -335,6 +335,13 @@ def update_field_values(form_entry_id):
 # =====================================
 @form_entries_blueprint.route("/form_entries", methods=["GET"])
 def get_all_form_entries():
+    """
+    Fetch all FormEntry records with optional filters:
+    - clinic_id
+    - location_id
+    - form_type
+    Includes related field values and form-type recipients.
+    """
     try:
         # Optional query params
         clinic_id = request.args.get("clinic_id")
@@ -356,26 +363,28 @@ def get_all_form_entries():
 
         results = []
         for entry in entries:
-            # Fetch all field values for this form entry
+            # ✅ Get field values for this entry
             field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
             values_list = [
                 {"field_name": fv.field_name, "field_value": fv.field_value}
                 for fv in field_values
             ]
 
-            # Optional: Get assigned user
-            assignment = FormAssignment.query.filter_by(form_entry_id=entry.id)\
-                .order_by(FormAssignment.id.desc()).first()
-            assigned_user = get_user_info_by_id(assignment.assigned_to) if assignment else None
+            # ✅ Get email recipients for this form_type
+            recipients = FormEmailRecipient.query.filter_by(form_type=entry.form_type).all()
+            recipient_emails = [r.email for r in recipients]
 
+            # ✅ Build entry JSON
             results.append({
                 "id": entry.id,
                 "form_type": entry.form_type,
                 "submitted_by_id": entry.submitted_by_id,
                 "clinic_id": entry.clinic_id,
                 "location_id": entry.location_id,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None,
+                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
                 "field_values": values_list,
-                "assigned_user": assigned_user
+                "recipients": recipient_emails
             })
 
         return jsonify({
@@ -387,44 +396,47 @@ def get_all_form_entries():
         print(f"❌ Error in get_all_form_entries: {e}")
         return jsonify({"error": str(e)}), 500
 
-
 # # =====================================
 # # 🔵 GET BY ID
 # # =====================================
 @form_entries_blueprint.route("/form_entries/<int:form_entry_id>", methods=["GET"])
 def get_form_entry_by_id(form_entry_id):
+    """
+    Fetch a single FormEntry by ID with its field values
+    and email recipients for its form_type.
+    """
     try:
         entry = FormEntry.query.get(form_entry_id)
         if not entry:
             return jsonify({"error": "Form entry not found"}), 404
 
-        # Fetch related field values
+        # ✅ Get field values
         field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
         values_list = [
             {"field_name": fv.field_name, "field_value": fv.field_value}
             for fv in field_values
         ]
 
-        # Optional: Get assignment info
-        assignment = FormAssignment.query.filter_by(form_entry_id=entry.id)\
-            .order_by(FormAssignment.id.desc()).first()
-        assigned_user = get_user_info_by_id(assignment.assigned_to) if assignment else None
+        # ✅ Get email recipients for this form type
+        recipients = FormEmailRecipient.query.filter_by(form_type=entry.form_type).all()
+        recipient_emails = [r.email for r in recipients]
 
+        # ✅ Return response
         return jsonify({
             "id": entry.id,
             "form_type": entry.form_type,
             "submitted_by_id": entry.submitted_by_id,
             "clinic_id": entry.clinic_id,
             "location_id": entry.location_id,
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+            "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
             "field_values": values_list,
-            "assigned_user": assigned_user
+            "recipients": recipient_emails
         }), 200
 
     except Exception as e:
         print(f"❌ Error in get_form_entry_by_id: {e}")
         return jsonify({"error": str(e)}), 500
-
-
 
 # =====================================
 # 🔴 DELETE
