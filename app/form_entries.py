@@ -451,63 +451,58 @@ def update_field_values(form_entry_id):
 @form_entries_blueprint.route("/form_entries/by_form_type/<int:form_type_id>", methods=["GET"])
 def get_form_entries_by_form_type(form_type_id):
     """
-    Fetch all FormEntries related to a specific form_type_id.
+    Fetch all FormEntry records for a given form_type_id.
     Includes:
-      - Field values
-      - Submitted user info
-      - Assigned users (via Auth backend API)
-    Optional pagination via ?page=1&per_page=10
+    - field values
+    - submitter info
+    - assigned users (from Auth backend API)
+    - form type details fetched from Auth backend
     """
     try:
-        page = request.args.get("page", default=1, type=int)
-        per_page = request.args.get("per_page", default=10, type=int)
-
-        # ✅ Validate FormType
-        ft = FormType.query.get(form_type_id)
-        if not ft:
-            return jsonify({"error": f"FormType with ID {form_type_id} not found"}), 404
-
-        # ✅ Base query
-        query = (
-            db.session.query(FormEntry, FormType)
-            .select_from(FormEntry)
-            .join(FormType, FormEntry.form_type_id == FormType.id)
-            .filter(FormEntry.form_type_id == form_type_id)
-            .order_by(FormEntry.created_at.desc())
-        )
-
-        total_count = query.count()
-        paginated = query.limit(per_page).offset((page - 1) * per_page).all()
-
-
-        # ✅ Fetch assigned users from Auth backend once
+        # ✅ Fetch form type details from Auth API
+        ft = None
         assigned_users = []
         try:
             resp = requests.get(f"{AUTH_API_BASE}/{form_type_id}", timeout=8)
             if resp.status_code == 200:
                 api_data = resp.json()
+                ft = api_data
                 assigned_users = api_data.get("users", [])
+            else:
+                print(f"⚠️ External API form_type fetch failed: {resp.status_code}")
         except Exception as e:
-            print(f"⚠️ Error fetching assigned users for form_type_id={form_type_id}: {e}")
+            print(f"⚠️ Error fetching form_type from API: {e}")
 
-        # ✅ Build results list
+        if not ft:
+            return jsonify({"error": "Invalid form_type_id"}), 404
+
+        # ✅ Fetch form entries from local DB
+        form_entries = (
+            FormEntry.query.filter_by(form_type_id=form_type_id)
+            .order_by(FormEntry.created_at.desc())
+            .all()
+        )
+
         results = []
-        for entry, ft in paginated:
-            # Field values
+        for entry in form_entries:
+            # ✅ Field values
             field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
             values_list = [
                 {"field_name": fv.field_name, "field_value": fv.field_value}
                 for fv in field_values
             ]
 
-            # Submitter info
-            submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
+            # ✅ Submitter info
+            submitted_user = (
+                get_user_info_by_id(entry.submitted_by_id)
+                if entry.submitted_by_id else None
+            )
 
             results.append({
                 "id": entry.id,
-                "form_type_id": entry.form_type_id,
-                "form_type_name": ft.name,
-                "form_type_description": ft.description,
+                "form_type_id": form_type_id,
+                "form_type_name": ft.get("name"),
+                "form_type_description": ft.get("description"),
                 "assigned_users": assigned_users,
                 "submitted_by": submitted_user,
                 "clinic_id": entry.clinic_id,
@@ -519,20 +514,15 @@ def get_form_entries_by_form_type(form_type_id):
 
         return jsonify({
             "form_type_id": form_type_id,
-            "form_type_name": ft.name,
-            "form_type_description": ft.description,
-            # "assigned_users": assigned_users,
-            "page": page,
-            "per_page": per_page,
-            "total": total_count,
-            "total_pages": (total_count + per_page - 1) // per_page,
-            "form_entries": results
+            "form_type_name": ft.get("name"),
+            "description": ft.get("description"),
+            "total_entries": len(results),
+            "entries": results
         }), 200
 
     except Exception as e:
         print(f"❌ Error in get_form_entries_by_form_type: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 
 
