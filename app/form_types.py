@@ -83,9 +83,33 @@ def create_form_type():
 @form_types_blueprint.route("/form_types", methods=["GET"])
 def get_all_form_types():
     try:
-        form_types = FormType.query.order_by(FormType.id.desc()).all()
-        results = []
+        # 🔹 Query params for pagination
+        page = request.args.get("page", 1, type=int)
+        per_page = request.args.get("per_page", 10, type=int)
 
+        # 🔹 Query params for filtering
+        clinic_id = request.args.get("clinic_id", type=int)
+        location_id = request.args.get("location_id", type=int)
+        name = request.args.get("name", type=str)
+
+        # 🔹 Base query
+        query = FormType.query
+
+        if clinic_id:
+            query = query.filter_by(clinic_id=clinic_id)
+        if location_id:
+            query = query.filter_by(location_id=location_id)
+        if name:
+            query = query.filter(FormType.name.ilike(f"%{name}%"))
+
+        # 🔹 Order by latest
+        query = query.order_by(FormType.id.desc())
+
+        # 🔹 Pagination
+        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+        form_types = paginated.items
+
+        results = []
         for ft in form_types:
             mappings = FormTypeUserNoti.query.filter_by(form_type_id=ft.id).all()
             user_ids = [m.user_id for m in mappings]
@@ -100,12 +124,17 @@ def get_all_form_types():
                 "owner": owner,
                 "clinic_id": ft.clinic_id,
                 "location_id": ft.location_id,
-                # "user_ids": user_ids,
                 "users": users,
                 "created_at": ft.created_at.isoformat() if ft.created_at else None
             })
 
-        return jsonify({"total": len(results), "form_types": results}), 200
+        return jsonify({
+            "total": paginated.total,
+            "page": paginated.page,
+            "per_page": paginated.per_page,
+            "pages": paginated.pages,
+            "form_types": results
+        }), 200
 
     except Exception as e:
         print(f"❌ Error in get_all_form_types: {e}")

@@ -1,141 +1,28 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime
+import os
+import requests
+
 from app import db
-from app.model import FormEntry, FormFieldValue, FormEmailRecipient, FormType, FormTypeUserNoti, FormEmailLog
+from app.model import (
+    FormEntry,
+    FormFieldValue,
+    FormEmailRecipient,
+    FormType,
+    FormTypeUserNoti,
+    FormEmailLog
+)
 from app.utils.email_templete import send_email, get_user_info_by_id, generate_email_template
 from app.dashboard_routes import require_api_key, validate_token
 
 
+# 🔹 Blueprint
 form_entries_blueprint = Blueprint("form_entries", __name__)
 
-# =====================================
-# 🟢 STEP 1 — Create Base FormEntry
-# =====================================
-# @form_entries_blueprint.route("/form_entries", methods=["POST"])
-# def create_form_entry():
-#     try:
-#         data = request.get_json()
 
-#         form_entry = FormEntry(
-#             form_type=data.get("form_type"),
-#             submitted_by_id=data.get("submitted_by_id"),
-#             clinic_id=data.get("clinic_id"),
-#             location_id=data.get("location_id"),
-#         )
-#         db.session.add(form_entry)
-#         db.session.commit()
-
-#         return jsonify({
-#             "message": "Form entry created successfully",
-#             "form_entry_id": form_entry.id
-#         }), 201
-
-#     except Exception as e:
-#         db.session.rollback()
-#         return jsonify({"error": str(e)}), 500
-
-# # =====================================
-# # 🟡 UPDATE
-# # =====================================
-# @form_entries_blueprint.route("/form_entries/<int:entry_id>", methods=["PUT"])
-# def update_form_entry(entry_id):
-#     try:
-#         data = request.get_json()
-#         entry = FormEntry.query.get(entry_id)
-#         if not entry:
-#             return jsonify({"error": "Form entry not found"}), 404
-
-#         entry.form_type = data.get("form_type", entry.form_type)
-#         entry.clinic_id = data.get("clinic_id", entry.clinic_id)
-#         entry.location_id = data.get("location_id", entry.location_id)
-#         entry.updated_at = datetime.utcnow()
-#         db.session.commit()
-
-#         return jsonify({"message": "Form entry updated successfully"}), 200
-
-#     except Exception as e:
-#         db.session.rollback()
-#         return jsonify({"error": str(e)}), 500
-
-
-
-# =====================================
-# 🟢 STEP 2 — Assign User
-# =====================================
-# @form_entries_blueprint.route("/form_entries/assign/<int:form_entry_id>", methods=["POST"])
-# def assign_form_entry(form_entry_id):
-#     try:
-#         data = request.get_json()
-
-#         # ✅ Check if form entry exists
-#         entry = FormEntry.query.get(form_entry_id)
-#         if not entry:
-#             return jsonify({"error": "Form entry not found"}), 404
-
-#         # ✅ Add or update field values
-#         field_values = data.get("field_values", [])
-#         for field in field_values:
-#             fv = FormFieldValue(
-#                 form_entry_id=entry.id,
-#                 field_name=field.get("field_name"),
-#                 field_value=field.get("field_value"),
-#             )
-#             db.session.add(fv)
-#         db.session.commit()
-
-#         # ✅ Assign to user
-#         assigned_to = data.get("assigned_to")  # user_id of the person being assigned
-#         assigned_by = data.get("assigned_by")  # who assigned
-#         if not assigned_to:
-#             return jsonify({"error": "Missing assigned_to user_id"}), 400
-
-#         # ✅ Fetch user info from API
-#         user_info = get_user_info_by_id(assigned_to)
-#         if not user_info:
-#             return jsonify({"error": "Assigned user info not found"}), 404
-
-#         # ✅ Save FormAssignment
-#         assignment = FormAssignment(
-#             form_entry_id=entry.id,
-#             assigned_by=assigned_by,
-#             assigned_to=assigned_to,
-#             created_at=datetime.utcnow()
-#         )
-#         db.session.add(assignment)
-#         db.session.commit()
-
-#         return jsonify({
-#             "message": "Form assigned successfully",
-#             "form_entry_id": entry.id,
-#             "assigned_user": user_info
-#         }), 201
-
-#     except Exception as e:
-#         db.session.rollback()
-#         print(f"❌ Error in assign_form_entry: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-
-# =====================================
-# 🟢 STEP 3 — Add Field Values + Send Email
-# =====================================
-import requests
-from datetime import datetime
-from flask import jsonify, request
-import os
 MAILGUN_API_URL = os.getenv("MAILGUN_API_URL")
-MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY") 
+MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY")
 
-# ==============================
-# 🔹 Email Utilities
-# ==============================
-
-
-
-
-# ==============================
-# 🔹 Main API Endpoint
-# ==============================
 # ================================================================
 # 🟢 CREATE FORM ENTRY + AUTO EMAIL TO MAPPED USERS
 # ================================================================
@@ -217,7 +104,8 @@ def create_form_entry_with_field_values():
                 form_type_id=form_type_id,
                 sender_id=submitted_by_id,
                 email_type="form_submission",
-                sender_email=user_info.get("email"),
+                sender_email=user_info.get("email"),                
+                # sender_email="support@360dentalbillingsolutions.com",
                 receiver_id=mapping.user_id,
                 message=f"Form submitted for {ft.name}",
                 status=status
@@ -230,7 +118,6 @@ def create_form_entry_with_field_values():
             "message": "Form entry created successfully and notifications sent.",
             "form_entry_id": new_entry.id,
             "form_type_id": form_type_id,
-            # "recipients": [e["email"] for e in email_status],
             "email_status": email_status
         }), 201
 
@@ -238,6 +125,8 @@ def create_form_entry_with_field_values():
         db.session.rollback()
         print(f"❌ Error in create_form_entry_with_field_values: {e}")
         return jsonify({"error": str(e)}), 500
+
+
 
 
 
@@ -332,7 +221,8 @@ def update_field_values(form_entry_id):
                 form_type_id=form_entry.form_type_id,
                 sender_id=submitted_by_id,
                 email_type="form_update",
-                sender_email=user_info.get("email"),
+                sender_email=user_info.get("email"),                
+                # sender_email="support@360dentalbillingsolutions.com",
                 receiver_id=mapping.user_id,
                 message=f"Form update notification sent for {ft.name}",
                 status=status

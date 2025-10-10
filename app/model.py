@@ -247,3 +247,8 @@ class FormEmailLog(db.Model):
 
     def __repr__(self):
         return f"<FormEmailLog from={self.sender_email} to={self.receiver_id} ({self.status})>"
+
+
+
+
+
