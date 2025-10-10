@@ -87,11 +87,11 @@ def create_form_entry_with_field_values():
         # ✅ Fetch assigned users from Auth backend API
         assigned_users = []
         try:
-            url = f"http://192.168.0.101:5000/api/form_types/{form_type_id}"
+            url = f"{AUTH_API_BASE}/{form_type_id}"
             resp = requests.get(url, timeout=8)
             if resp.status_code == 200:
                 data = resp.json()
-                assigned_users = data.get("assign_users", [])
+                assigned_users = data.get("users", [])
         except Exception as api_err:
             print(f"❌ Error fetching assigned users: {api_err}")
 
@@ -230,7 +230,7 @@ def update_field_values(form_entry_id):
             resp = requests.get(url, timeout=8)
             if resp.status_code == 200:
                 data = resp.json()
-                assigned_users = data.get("assign_users", [])
+                assigned_users = data.get("users", [])
         except Exception as api_err:
             print(f"❌ Error fetching assigned users: {api_err}")
 
