@@ -147,12 +147,15 @@ class FormType(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), unique=True, nullable=False)  # e.g., new_hire, transfer
-    display_name = db.Column(db.String(255), nullable=True)        # e.g., "New Hire"
-    description = db.Column(db.Text, nullable=True)
+    description = db.Column(db.Text)
+    user_id = db.Column(db.Integer)
+    clinic_id = db.Column(db.Integer)
+    location_id = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def __repr__(self):
         return f"<FormType {self.name}>"
+
 
 class FormEntry(db.Model):
     """
