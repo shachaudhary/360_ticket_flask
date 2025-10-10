@@ -453,13 +453,12 @@ def get_form_entries_by_form_type(form_type_id):
     """
     Fetch all FormEntry records for a given form_type_id.
     Includes:
-    - field values
     - submitter info
     - assigned users (from Auth backend API)
-    - form type details fetched from Auth backend
+    - form type details (from Auth backend)
     """
     try:
-        # ✅ Fetch form type details from Auth API
+        # ✅ Fetch form type details & assigned users from Auth API
         ft = None
         assigned_users = []
         try:
@@ -476,23 +475,16 @@ def get_form_entries_by_form_type(form_type_id):
         if not ft:
             return jsonify({"error": "Invalid form_type_id"}), 404
 
-        # ✅ Fetch form entries from local DB
+        # ✅ Fetch all FormEntries for this form type
         form_entries = (
             FormEntry.query.filter_by(form_type_id=form_type_id)
             .order_by(FormEntry.created_at.desc())
             .all()
         )
 
+        # ✅ Prepare clean response (no field values)
         results = []
         for entry in form_entries:
-            # ✅ Field values
-            field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
-            values_list = [
-                {"field_name": fv.field_name, "field_value": fv.field_value}
-                for fv in field_values
-            ]
-
-            # ✅ Submitter info
             submitted_user = (
                 get_user_info_by_id(entry.submitted_by_id)
                 if entry.submitted_by_id else None
@@ -508,8 +500,7 @@ def get_form_entries_by_form_type(form_type_id):
                 "clinic_id": entry.clinic_id,
                 "location_id": entry.location_id,
                 "created_at": entry.created_at.isoformat() if entry.created_at else None,
-                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-                "field_values": values_list
+                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None
             })
 
         return jsonify({
@@ -525,6 +516,73 @@ def get_form_entries_by_form_type(form_type_id):
         return jsonify({"error": str(e)}), 500
 
 
+@form_entries_blueprint.route("/form_entries/details/<int:form_entry_id>", methods=["GET"])
+def get_form_entry_details(form_entry_id):
+    """
+    Fetch a specific FormEntry (by ID) with:
+    - Field values from FormFieldValue
+    - Submitter info
+    - Assigned users (from Auth backend API)
+    - FormType details (from Auth backend)
+    """
+    try:
+        # ✅ Fetch FormEntry from DB
+        form_entry = FormEntry.query.get(form_entry_id)
+        if not form_entry:
+            return jsonify({"error": "Form entry not found"}), 404
+
+        form_type_id = form_entry.form_type_id
+
+        # ✅ Fetch form type details & assigned users from Auth backend
+        ft = None
+        assigned_users = []
+        try:
+            resp = requests.get(f"{AUTH_API_BASE}/{form_type_id}", timeout=8)
+            if resp.status_code == 200:
+                api_data = resp.json()
+                ft = api_data
+                assigned_users = api_data.get("users", [])
+            else:
+                print(f"⚠️ Failed to fetch form type from Auth API: {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching form type from API: {e}")
+
+        if not ft:
+            return jsonify({"error": "Invalid form_type_id"}), 404
+
+        # ✅ Fetch all field values
+        field_values = FormFieldValue.query.filter_by(form_entry_id=form_entry.id).all()
+        values_list = [
+            {"field_name": fv.field_name, "field_value": fv.field_value}
+            for fv in field_values
+        ]
+
+        # ✅ Fetch submitter info
+        submitted_user = (
+            get_user_info_by_id(form_entry.submitted_by_id)
+            if form_entry.submitted_by_id else None
+        )
+
+        # ✅ Build final response
+        result = {
+            "id": form_entry.id,
+            "form_type_id": form_type_id,
+            "form_type_name": ft.get("name"),
+            "form_type_description": ft.get("description"),
+            "assigned_users": assigned_users,
+            "submitted_by": submitted_user,
+            "clinic_id": form_entry.clinic_id,
+            "location_id": form_entry.location_id,
+            "created_at": form_entry.created_at.isoformat() if form_entry.created_at else None,
+            "updated_at": form_entry.updated_at.isoformat() if form_entry.updated_at else None,
+            "field_values": values_list
+        }
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"❌ Error in get_form_entry_details: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # =====================================
