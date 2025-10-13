@@ -534,3 +534,28 @@ def get_form_type_details(form_type_id):
     except Exception as e:
         print(f"❌ Error in get_form_type_details: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+
+@form_entries_blueprint.route("/form_entries/count", methods=["GET"])
+def get_form_entries_count():
+    """
+    Count total form submissions by form_type_id
+    Example: /api/form_entries/count?form_type_id=1
+    """
+    try:
+        form_type_id = request.args.get("form_type_id", type=int)
+
+        if not form_type_id:
+            return jsonify({"error": "form_type_id is required"}), 400
+
+        total = FormEntry.query.filter_by(form_type_id=form_type_id).count()
+
+        return jsonify({
+            "form_type_id": form_type_id,
+            "total": total
+        }), 200
+
+    except Exception as e:
+        print(f"❌ Error in get_form_entries_count: {e}")
+        return jsonify({"error": str(e)}), 500

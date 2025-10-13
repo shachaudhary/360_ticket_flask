@@ -155,8 +155,6 @@ class FormEntry(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship
-    # form_type = db.relationship("FormType", backref=db.backref("entries", lazy=True))
 
     def __repr__(self):
         return f"<FormEntry {self.id} - {self.form_type.name}>"
