@@ -4,7 +4,8 @@ from app.model import Ticket, TicketNotification, FormEmailLog
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime
-
+import os
+import requests
 
 
 
@@ -13,6 +14,7 @@ notification_bp = Blueprint("notifications", __name__, url_prefix="notifications
 # ───────────────────────────────
 # Create Notification function
 # ───────────────────────────────
+AUTH_API_BASE = "https://api.dental360grp.com/api/form_types"
 
 def create_notification(ticket_id, receiver_id, sender_id, notification_type, message=None):
     """Create a new ticket notification"""
