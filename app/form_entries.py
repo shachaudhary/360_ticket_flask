@@ -152,11 +152,11 @@ def create_form_entry_with_field_values():
 # ================================================================
 # 🟠 UPDATE FORM ENTRY + EMAIL NOTIFY MAPPED USERS
 # ================================================================
-@form_entries_blueprint.route("/form_entries/field_values/<int:form_entry_id>", methods=["PUT"])
-def update_field_values(form_entry_id):
+@form_entries_blueprint.route("/form_entries/field_values/<int:form_entry_id>", methods=["PATCH"])
+def patch_form_entry_field_values(form_entry_id):
     """
-    Update an existing FormEntry using form_type_id,
-    update field values, and send email notifications
+    Partially update a FormEntry using form_type_id (if provided),
+    update only the provided fields, and send email notifications
     to all assigned users fetched via the Auth backend API.
     """
     try:
@@ -168,22 +168,21 @@ def update_field_values(form_entry_id):
         location_id = data.get("location_id")
         field_values = data.get("field_values", [])
 
-        if not field_values:
-            return jsonify({"error": "No field values provided"}), 400
-
         # ✅ Fetch entry
         form_entry = FormEntry.query.get(form_entry_id)
         if not form_entry:
             return jsonify({"error": "Form entry not found"}), 404
 
         # ===========================================================
-        # ✅ Validate FormType — only via external API
+        # ✅ Single external API call — fetch form type + assigned users
         # ===========================================================
         ft = None
+        assigned_users = []
         try:
             resp = requests.get(f"{AUTH_API_BASE}/{form_type_id or form_entry.form_type_id}", timeout=8)
             if resp.status_code == 200:
                 ft = resp.json()
+                assigned_users = ft.get("users", [])  # ✅ use same response for both
             else:
                 print(f"⚠️ External API form_type fetch failed: {resp.status_code}")
         except Exception as e:
@@ -192,46 +191,38 @@ def update_field_values(form_entry_id):
         if not ft:
             return jsonify({"error": "Invalid form_type_id"}), 404
 
-        # ✅ Update base metadata
-        form_entry.form_type_id = form_type_id or form_entry.form_type_id
+        # ✅ Update only provided fields
+        if form_type_id:
+            form_entry.form_type_id = form_type_id
         if submitted_by_id:
             form_entry.submitted_by_id = submitted_by_id
         if clinic_id:
             form_entry.clinic_id = clinic_id
         if location_id:
             form_entry.location_id = location_id
+
         db.session.commit()
 
-        # ✅ Update or insert field values
-        for field in field_values:
-            field_name = field.get("field_name")
-            if not field_name:
-                continue
+        # ✅ Update or add field values (if provided)
+        if field_values:
+            for field in field_values:
+                field_name = field.get("field_name")
+                if not field_name:
+                    continue
 
-            existing_field = FormFieldValue.query.filter_by(
-                form_entry_id=form_entry.id, field_name=field_name
-            ).first()
+                existing_field = FormFieldValue.query.filter_by(
+                    form_entry_id=form_entry.id, field_name=field_name
+                ).first()
 
-            if existing_field:
-                existing_field.field_value = field.get("field_value", "")
-            else:
-                db.session.add(FormFieldValue(
-                    form_entry_id=form_entry.id,
-                    field_name=field_name,
-                    field_value=field.get("field_value", "")
-                ))
-        db.session.commit()
-
-        # ✅ Fetch assigned users from Auth backend API
-        assigned_users = []
-        try:
-            url = f"{AUTH_API_BASE}/{form_entry.form_type_id}"
-            resp = requests.get(url, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                assigned_users = data.get("users", [])
-        except Exception as api_err:
-            print(f"❌ Error fetching assigned users: {api_err}")
+                if existing_field:
+                    existing_field.field_value = field.get("field_value", "")
+                else:
+                    db.session.add(FormFieldValue(
+                        form_entry_id=form_entry.id,
+                        field_name=field_name,
+                        field_value=field.get("field_value", "")
+                    ))
+            db.session.commit()
 
         # ✅ Compose update email
         ft_name = ft.get("name", "Form")
@@ -242,7 +233,7 @@ def update_field_values(form_entry_id):
         ]
         body_html = generate_email_template(subject, body_lines)
 
-        # ✅ Send emails to assigned users
+        # ✅ Send notification emails
         email_status = []
         for user in assigned_users:
             email = user.get("email")
@@ -252,7 +243,6 @@ def update_field_values(form_entry_id):
             sent = send_email(email, subject, body_html)
             status = "sent" if sent else "failed"
 
-            # ✅ Log email
             db.session.add(FormEmailLog(
                 form_entry_id=form_entry.id,
                 form_type_id=form_entry.form_type_id,
@@ -268,7 +258,7 @@ def update_field_values(form_entry_id):
         db.session.commit()
 
         return jsonify({
-            "message": "Form entry updated successfully and notifications sent.",
+            "message": "Form entry partially updated successfully and notifications sent.",
             "form_entry_id": form_entry.id,
             "form_type_id": form_entry.form_type_id,
             "form_type_name": ft_name,
@@ -277,9 +267,8 @@ def update_field_values(form_entry_id):
 
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Error in update_field_values: {e}")
+        print(f"❌ Error in patch_form_entry_field_values: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 @form_entries_blueprint.route("/form_entries/by_form_type/<int:form_type_id>", methods=["GET"])
 def get_form_entries_by_form_type(form_type_id):
