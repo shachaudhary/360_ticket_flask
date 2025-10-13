@@ -584,113 +584,82 @@ def get_form_entry_details(form_entry_id):
         print(f"❌ Error in get_form_entry_details: {e}")
         return jsonify({"error": str(e)}), 500
 
+@form_entries_blueprint.route("/stats/form_entries_summary/<int:form_type_id>", methods=["GET"])
+def get_form_type_details(form_type_id):
+    """
+    📊 Returns detailed stats for a specific form type:
+      - Summary statistics (without unique_submitters)
+      - Assigned users (with email)
+      - Submission list (entries)
+    """
 
-# =====================================
-# 🔴 DELETE
-# =====================================
-# @form_entries_blueprint.route("/form_entries/<int:entry_id>", methods=["DELETE"])
-# def delete_form_entry(entry_id):
-#     try:
-#         entry = FormEntry.query.get(entry_id)
-#         if not entry:
-#             return jsonify({"error": "Form entry not found"}), 404
+    try:
+        # ✅ Fetch form type details + assigned users from Auth API
+        ft = None
+        assigned_users = []
+        try:
+            resp = requests.get(f"{AUTH_API_BASE}/{form_type_id}", timeout=8)
+            if resp.status_code == 200:
+                api_data = resp.json()
+                ft = api_data
 
-#         FormFieldValue.query.filter_by(form_entry_id=entry.id).delete()
-#         FormAssignment.query.filter_by(form_entry_id=entry.id).delete()
-#         db.session.delete(entry)
-#         db.session.commit()
+                # include name + email of assigned users
+                assigned_users = [
+                    {
+                        "id": user.get("id"),
+                        "name": user.get("username"),
+                        "email": user.get("email")
+                    }
+                    for user in api_data.get("users", [])
+                ]
+            else:
+                print(f"⚠️ External API form_type fetch failed: {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching form_type from API: {e}")
 
-#         return jsonify({"message": "Form entry deleted successfully"}), 200
+        if not ft:
+            return jsonify({"error": "Invalid form_type_id"}), 404
 
-#     except Exception as e:
-#         db.session.rollback()
-#         return jsonify({"error": str(e)}), 500
+        # ✅ Fetch form entries for this form type
+        form_entries = (
+            FormEntry.query.filter_by(form_type_id=form_type_id)
+            .order_by(FormEntry.created_at.desc())
+            .all()
+        )
 
+        total_entries = len(form_entries)
+        latest_entry = max((e.created_at for e in form_entries if e.created_at), default=None)
 
-# @form_entries_blueprint.route("/form_email_recipients", methods=["POST"])
-# def add_form_email_recipient():
-#     try:
-#         data = request.get_json() or {}
-#         email = data.get("email")
-#         form_type = data.get("form_type")
+        # 🧠 Prepare submission list
+        submissions = []
+        for entry in form_entries:
+            submitted_user = (
+                get_user_info_by_id(entry.submitted_by_id)
+                if entry.submitted_by_id else None
+            )
 
-#         if not email or not form_type:
-#             return jsonify({"error": "email and form_type are required"}), 400
+            submissions.append({
+                "id": entry.id,
+                "submitted_by": submitted_user,
+                "clinic_id": entry.clinic_id,
+                "location_id": entry.location_id,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None,
+                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None
+            })
 
-#         new_recipient = FormEmailRecipient(email=email, form_type=form_type)
-#         db.session.add(new_recipient)
-#         db.session.commit()
+        # ✅ Final structured response
+        return jsonify({
+            "form_type_id": form_type_id,
+            "form_type_name": ft.get("name"),
+            "description": ft.get("description"),
+            "assigned_users": assigned_users,       # 👥 includes email
+            "stats": {                              # 📊 summary
+                "total_entries": total_entries,
+                "latest_entry_date": latest_entry.isoformat() if latest_entry else None
+            },
+            "submissions": submissions               # 📝 submission list
+        }), 200
 
-#         return jsonify({
-#             "message": "Email recipient added successfully.",
-#             "recipient_id": new_recipient.id
-#         }), 201
-
-#     except Exception as e:
-#         db.session.rollback()
-#         print(f"❌ Error in add_form_email_recipient: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-# @form_entries_blueprint.route("/form_email_recipients/<int:recipient_id>", methods=["PUT"])
-# def update_form_email_recipient(recipient_id):
-#     try:
-#         data = request.get_json() or {}
-#         recipient = FormEmailRecipient.query.get(recipient_id)
-
-#         if not recipient:
-#             return jsonify({"error": "Recipient not found"}), 404
-
-#         recipient.email = data.get("email", recipient.email)
-#         recipient.form_type = data.get("form_type", recipient.form_type)
-#         db.session.commit()
-
-#         return jsonify({
-#             "message": "Email recipient updated successfully.",
-#             "recipient_id": recipient.id
-#         }), 200
-
-#     except Exception as e:
-#         db.session.rollback()
-#         print(f"❌ Error in update_form_email_recipient: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-# @form_entries_blueprint.route("/form_email_recipients/<int:recipient_id>", methods=["DELETE"])
-# def delete_form_email_recipient(recipient_id):
-#     try:
-#         recipient = FormEmailRecipient.query.get(recipient_id)
-#         if not recipient:
-#             return jsonify({"error": "Recipient not found"}), 404
-
-#         db.session.delete(recipient)
-#         db.session.commit()
-
-#         return jsonify({"message": "Email recipient deleted successfully."}), 200
-
-#     except Exception as e:
-#         db.session.rollback()
-#         print(f"❌ Error in delete_form_email_recipient: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-# @form_entries_blueprint.route("/form_email_recipients", methods=["GET"])
-# def get_all_form_email_recipients():
-#     try:
-#         form_type = request.args.get("form_type")
-#         query = FormEmailRecipient.query
-#         if form_type:
-#             query = query.filter_by(form_type=form_type)
-
-#         recipients = query.order_by(FormEmailRecipient.created_at.desc()).all()
-#         return jsonify([
-#             {
-#                 "id": r.id,
-#                 "email": r.email,
-#                 "form_type": r.form_type,
-#                 "created_at": r.created_at.isoformat()
-#             }
-#             for r in recipients
-#         ]), 200
-
-#     except Exception as e:
-#         print(f"❌ Error in get_all_form_email_recipients: {e}")
-#         return jsonify({"error": str(e)}), 500
-
+    except Exception as e:
+        print(f"❌ Error in get_form_type_details: {e}")
+        return jsonify({"error": str(e)}), 500
