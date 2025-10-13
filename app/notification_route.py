@@ -79,6 +79,7 @@ def get_notifications():
             resp = requests.get(f"{AUTH_API_BASE}/{f.form_type_id}", timeout=8)
             if resp.status_code == 200:
                 api_data = resp.json()
+                form_type_name = api_data.get("name")
                 form_type_data = {
                     "id": api_data.get("id"),
                     "name": api_data.get("name"),
@@ -95,7 +96,8 @@ def get_notifications():
             "id": f.id,
             "source": "form",
             "form_entry_id": f.form_entry_id,   # ✅ NEW FIELD ADDED
-            "form_type": form_type_data,
+            "form_type_name": form_type_name,
+            # "form_type": form_type_data,
             "email_type": f.email_type,
             "message": f.message,
             "status": f.status,
