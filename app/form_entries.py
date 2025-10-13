@@ -280,183 +280,23 @@ def update_field_values(form_entry_id):
         print(f"❌ Error in update_field_values: {e}")
         return jsonify({"error": str(e)}), 500
 
-# =====================================
-# 🔵 GET ALL
-# =====================================
-# @form_entries_blueprint.route("/form_entries", methods=["GET"])
-# def get_all_form_entries():
-#     """
-#     Fetch paginated FormEntry records with optional filters:
-#     - clinic_id
-#     - location_id
-#     - form_type_id
-#     - form_type (by name)
-#     - submitted_by_id
-#     Includes FormType info, field values, submitter, and assigned users from Auth backend.
-#     """
-#     try:
-#         # --- Query params ---
-#         clinic_id = request.args.get("clinic_id", type=int)
-#         location_id = request.args.get("location_id", type=int)
-#         form_type = request.args.get("form_type")               # string name
-#         form_type_id = request.args.get("form_type_id", type=int)
-#         submitted_by_id = request.args.get("submitted_by_id", type=int)
-#         page = request.args.get("page", default=1, type=int)
-#         per_page = request.args.get("per_page", default=10, type=int)
-
-#         # --- Base query ---
-#         query = (
-#             db.session.query(FormEntry, FormType)
-#             .select_from(FormEntry)
-#             .join(FormType, FormEntry.form_type_id == FormType.id)
-#         )
-
-#         # --- Filters ---
-#         if clinic_id:
-#             query = query.filter(FormEntry.clinic_id == clinic_id)
-#         if location_id:
-#             query = query.filter(FormEntry.location_id == location_id)
-#         if form_type_id:
-#             query = query.filter(FormEntry.form_type_id == form_type_id)
-#         if form_type:
-#             query = query.filter(FormType.name.ilike(f"%{form_type}%"))
-#         if submitted_by_id:
-#             query = query.filter(FormEntry.submitted_by_id == submitted_by_id)
-
-#         # --- Count total before pagination ---
-#         total_count = query.count()
-
-#         # --- Pagination ---
-#         query = query.order_by(FormEntry.created_at.desc())
-#         paginated = query.limit(per_page).offset((page - 1) * per_page).all()
-
-
-#         results = []
-#         for entry, ft in paginated:
-#             # ✅ Field values
-#             field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
-#             values_list = [
-#                 {"field_name": fv.field_name, "field_value": fv.field_value}
-#                 for fv in field_values
-#             ]
-
-#             # ✅ Submitter info
-#             submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
-
-#             # ✅ Assigned users (via Auth API)
-#             assigned_users = []
-#             try:
-#                 resp = requests.get(f"{AUTH_API_BASE}/{entry.form_type_id}", timeout=8)
-#                 if resp.status_code == 200:
-#                     api_data = resp.json()
-#                     assigned_users = api_data.get("users", [])
-#             except Exception as e:
-#                 print(f"⚠️ Error fetching assigned users for form_type_id={entry.form_type_id}: {e}")
-
-#             results.append({
-#                 "id": entry.id,
-#                 "form_type_id": entry.form_type_id,
-#                 "form_type_name": ft.name,
-#                 "form_type_description": ft.description,
-#                 "assigned_users": assigned_users,
-#                 "submitted_by": submitted_user,
-#                 "clinic_id": entry.clinic_id,
-#                 "location_id": entry.location_id,
-#                 "created_at": entry.created_at.isoformat() if entry.created_at else None,
-#                 "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-#                 "field_values": values_list
-#             })
-
-#         return jsonify({
-#             "page": page,
-#             "per_page": per_page,
-#             "total": total_count,
-#             "total_pages": (total_count + per_page - 1) // per_page,
-#             "form_entries": results
-#         }), 200
-
-#     except Exception as e:
-#         print(f"❌ Error in get_all_form_entries: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-# # =====================================
-# # 🔵 GET BY ID
-# # =====================================
-# @form_entries_blueprint.route("/form_entries/<int:form_entry_id>", methods=["GET"])
-# def get_form_entry_by_id(form_entry_id):
-#     """
-#     Fetch a single FormEntry by ID with:
-#     - FormType info (name, description)
-#     - Field values
-#     - Submitter user info
-#     - Assigned users (from Auth backend)
-#     """
-#     try:
-#         # ✅ Join FormEntry & FormType
-#         row = (
-#             db.session.query(FormEntry, FormType)
-#             .select_from(FormEntry)
-#             .join(FormType, FormEntry.form_type_id == FormType.id)
-#             .filter(FormEntry.id == form_entry_id)
-#             .first()
-#         )
-
-#         if not row:
-#             return jsonify({"error": "Form entry not found"}), 404
-
-#         entry, ft = row
-
-#         # ✅ Field values
-#         field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
-#         values_list = [
-#             {"field_name": fv.field_name, "field_value": fv.field_value}
-#             for fv in field_values
-#         ]
-
-#         # ✅ Submitter info
-#         submitted_user = get_user_info_by_id(entry.submitted_by_id) if entry.submitted_by_id else None
-
-#         # ✅ Assigned users (via Auth API)
-#         assigned_users = []
-#         try:
-#             resp = requests.get(f"{AUTH_API_BASE}/{entry.form_type_id}", timeout=8)
-#             if resp.status_code == 200:
-#                 api_data = resp.json()
-#                 assigned_users = api_data.get("users", [])
-#         except Exception as e:
-#             print(f"⚠️ Error fetching assigned users for form_type_id={entry.form_type_id}: {e}")
-
-#         # ✅ Build response
-#         return jsonify({
-#             "id": entry.id,
-#             "form_type_id": entry.form_type_id,
-#             "form_type_name": ft.name,
-#             "form_type_description": ft.description,
-#             "assigned_users": assigned_users,
-#             "submitted_by": submitted_user,
-#             "clinic_id": entry.clinic_id,
-#             "location_id": entry.location_id,
-#             "created_at": entry.created_at.isoformat() if entry.created_at else None,
-#             "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-#             "field_values": values_list
-#         }), 200
-
-#     except Exception as e:
-#         print(f"❌ Error in get_form_entry_by_id: {e}")
-#         return jsonify({"error": str(e)}), 500
-
-
 
 @form_entries_blueprint.route("/form_entries/by_form_type/<int:form_type_id>", methods=["GET"])
 def get_form_entries_by_form_type(form_type_id):
     """
-    Fetch all FormEntry records for a given form_type_id.
+    Fetch paginated FormEntry records for a given form_type_id.
     Includes:
     - submitter info
     - assigned users (from Auth backend API)
     - form type details (from Auth backend)
+    - search filter by submitter name, email, or field value
     """
     try:
+        # --- Query params ---
+        page = request.args.get("page", default=1, type=int)
+        per_page = request.args.get("per_page", default=10, type=int)
+        search = request.args.get("search", type=str)
+
         # ✅ Fetch form type details & assigned users from Auth API
         ft = None
         assigned_users = []
@@ -474,16 +314,47 @@ def get_form_entries_by_form_type(form_type_id):
         if not ft:
             return jsonify({"error": "Invalid form_type_id"}), 404
 
-        # ✅ Fetch all FormEntries for this form type
-        form_entries = (
-            FormEntry.query.filter_by(form_type_id=form_type_id)
-            .order_by(FormEntry.created_at.desc())
+        # ✅ Base query
+        query = FormEntry.query.filter_by(form_type_id=form_type_id)
+
+        # ✅ Apply search filter (by submitter or field)
+        if search:
+            search = f"%{search.lower()}%"
+            # Collect IDs from submitter name/email matches
+            matching_ids = []
+            all_entries = query.all()
+            for entry in all_entries:
+                submitted_user = get_user_info_by_id(entry.submitted_by_id)
+                if submitted_user:
+                    username = submitted_user.get("username", "").lower()
+                    email = submitted_user.get("email", "").lower()
+                    if search.strip("%") in username or search.strip("%") in email:
+                        matching_ids.append(entry.id)
+                        continue
+
+                # Also match inside field values (if text matches any field)
+                field_values = FormFieldValue.query.filter_by(form_entry_id=entry.id).all()
+                for fv in field_values:
+                    if search.strip("%") in fv.field_value.lower():
+                        matching_ids.append(entry.id)
+                        break
+
+            query = query.filter(FormEntry.id.in_(matching_ids)) if matching_ids else query.filter(False)
+
+        # ✅ Count total before pagination
+        total_count = query.count()
+
+        # ✅ Pagination
+        entries = (
+            query.order_by(FormEntry.created_at.desc())
+            .limit(per_page)
+            .offset((page - 1) * per_page)
             .all()
         )
 
-        # ✅ Prepare clean response (no field values)
+        # ✅ Build response
         results = []
-        for entry in form_entries:
+        for entry in entries:
             submitted_user = (
                 get_user_info_by_id(entry.submitted_by_id)
                 if entry.submitted_by_id else None
@@ -506,7 +377,10 @@ def get_form_entries_by_form_type(form_type_id):
             "form_type_id": form_type_id,
             "form_type_name": ft.get("name"),
             "description": ft.get("description"),
-            "total_entries": len(results),
+            "page": page,
+            "per_page": per_page,
+            "total": total_count,
+            "total_pages": (total_count + per_page - 1) // per_page,
             "entries": results
         }), 200
 
