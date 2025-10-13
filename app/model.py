@@ -139,22 +139,6 @@ class TicketStatusLog(db.Model):
 
 
 
-class FormType(db.Model):
-    """
-    Stores master list of available form types (e.g., New Hire, Transfer, Termination)
-    """
-    __tablename__ = "form_types"
-
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), unique=True, nullable=False)  # e.g., new_hire, transfer
-    description = db.Column(db.Text)
-    user_id = db.Column(db.Integer)
-    clinic_id = db.Column(db.Integer)
-    location_id = db.Column(db.Integer)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def __repr__(self):
-        return f"<FormType {self.name}>"
 
 
 class FormEntry(db.Model):
@@ -188,44 +172,11 @@ class FormFieldValue(db.Model):
     form_entry_id = db.Column(db.Integer)
     field_name = db.Column(db.String(255))
     field_value = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def __repr__(self):
         return f"<FormFieldValue {self.field_name}={self.field_value}>"
-
-
-
-class FormEmailRecipient(db.Model):
-    """
-    Stores email recipients for each form type (e.g. new_hire, transfer, termination)
-    """
-    __tablename__ = "form_email_recipients"
-
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(255), nullable=False)
-    form_type_id  = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def __repr__(self):
-        return f"<FormEmailRecipient {self.form_type_id } → {self.email}>"
-
-
-
-# =========================================================================
-
-class FormTypeUserNoti(db.Model):
-    """
-    Maps users to specific FormTypes for automatic notifications.
-    """
-    __tablename__ = "form_type_user_noti"
-
-    id = db.Column(db.Integer, primary_key=True)
-    form_type_id = db.Column(db.Integer, nullable=False)
-    user_id = db.Column(db.Integer, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def __repr__(self):
-        return f"<FormTypeUserNoti form_type_id={self.form_type_id}, user_id={self.user_id}>"
-
 
 
 class FormEmailLog(db.Model):
@@ -249,6 +200,9 @@ class FormEmailLog(db.Model):
         return f"<FormEmailLog from={self.sender_email} to={self.receiver_id} ({self.status})>"
 
 
+
+
+# =========================================================================
 
 
 

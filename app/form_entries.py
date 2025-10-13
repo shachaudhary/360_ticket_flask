@@ -7,8 +7,6 @@ from app import db
 from app.model import (
     FormEntry,
     FormFieldValue,
-    FormEmailRecipient,
-    FormTypeUserNoti,
     FormEmailLog
 )
 from app.utils.email_templete import send_email, get_user_info_by_id, generate_email_template
@@ -150,7 +148,7 @@ def create_form_entry_with_field_values():
 
 
 # ================================================================
-# 🟠 UPDATE FORM ENTRY + EMAIL NOTIFY MAPPED USERS
+#  UPDATE FORM ENTRY + EMAIL NOTIFY MAPPED USERS
 # ================================================================
 @form_entries_blueprint.route("/form_entries/field_values/<int:form_entry_id>", methods=["PATCH"])
 def patch_form_entry_field_values(form_entry_id):
@@ -270,6 +268,10 @@ def patch_form_entry_field_values(form_entry_id):
         print(f"❌ Error in patch_form_entry_field_values: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+# ================================================================
+#  GET FORM ENTRIES BY FORM TYPE
+# ================================================================
 @form_entries_blueprint.route("/form_entries/by_form_type/<int:form_type_id>", methods=["GET"])
 def get_form_entries_by_form_type(form_type_id):
     """
@@ -378,6 +380,9 @@ def get_form_entries_by_form_type(form_type_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ================================================================
+# GET /form_entries/details/<int:form_entry_id>
+# ================================================================
 @form_entries_blueprint.route("/form_entries/details/<int:form_entry_id>", methods=["GET"])
 def get_form_entry_details(form_entry_id):
     """
@@ -446,6 +451,10 @@ def get_form_entry_details(form_entry_id):
         print(f"❌ Error in get_form_entry_details: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+# ================================================================
+# GET /stats/form_entries_summary/<int:form_type_id>
+# ================================================================
 @form_entries_blueprint.route("/stats/form_entries_summary/<int:form_type_id>", methods=["GET"])
 def get_form_type_details(form_type_id):
     """
