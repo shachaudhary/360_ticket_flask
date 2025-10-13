@@ -59,6 +59,7 @@ def get_notifications():
         combined.append({
             "id": n.id,
             "source": "ticket",
+            "ticket_id": n.ticket_id,
             "title": ticket.title if ticket else None,
             "message": n.message,
             "notification_type": n.notification_type,
@@ -93,6 +94,7 @@ def get_notifications():
         combined.append({
             "id": f.id,
             "source": "form",
+            "form_entry_id": f.form_entry_id,   # ✅ NEW FIELD ADDED
             "form_type": form_type_data,
             "email_type": f.email_type,
             "message": f.message,
@@ -118,7 +120,6 @@ def get_notifications():
             "pages": (total + per_page - 1) // per_page
         }
     }), 200
-
 
 
 # ───────────────────────────────
