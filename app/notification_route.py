@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Ticket, TicketNotification
+from app.model import Ticket, TicketNotification, FormEmailLog
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime
@@ -27,8 +27,6 @@ def create_notification(ticket_id, receiver_id, sender_id, notification_type, me
     db.session.commit()
     return notif
 
-
-
 # ───────────────────────────────
 # Get Notifications for a User
 # ───────────────────────────────
@@ -38,66 +36,86 @@ def create_notification(ticket_id, receiver_id, sender_id, notification_type, me
 @require_api_key
 @validate_token
 def get_notifications():
-    receiver_id = request.args.get("user_id", type=int)  # 👈 param ab bhi user_id hi rahega
+    receiver_id = request.args.get("user_id", type=int)
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
 
     if not receiver_id:
         return jsonify({"error": "user_id is required"}), 400
 
-    # 🔹 Get receiver info
     receiver_info = get_user_info_by_id(receiver_id)
     if not receiver_info:
         return jsonify({"error": "Invalid user"}), 404
 
+    combined = []
 
-    # role = user_info.get("role", "").lower()
-
-    # 🔹 Admin & Superadmin → all notifications (COMMENTED OUT)
-    # if role in ["admin", "superadmin"]:
-    #     query = TicketNotification.query
-    # else:
-    #     query = TicketNotification.query.filter_by(user_id=user_id)
-
-    # 🔹 Ab sirf apne hi notifications show honge
-    # 🔹 Sirf apni notifications
-    query = TicketNotification.query.filter_by(receiver_id=receiver_id)
-
-    # ✅ Pagination
-    pagination = query.order_by(TicketNotification.created_at.desc()) \
-        .paginate(page=page, per_page=per_page, error_out=False)
-
-    notifications = pagination.items
-    result = []
-
-    for n in notifications:
+    # ────────────── Ticket Notifications ──────────────
+    tickets = TicketNotification.query.filter_by(receiver_id=receiver_id).all()
+    for n in tickets:
         ticket = Ticket.query.get(n.ticket_id)
-
         sender_info = get_user_info_by_id(n.sender_id) if n.sender_id else None
-        rec_info = get_user_info_by_id(n.receiver_id) if n.receiver_id else None
-
-        result.append({
+        combined.append({
             "id": n.id,
-            "ticket_id": n.ticket_id,
-            "ticket_title": ticket.title if ticket else None,
-            "notification_type": n.notification_type,
+            "source": "ticket",
+            "title": ticket.title if ticket else None,
             "message": n.message,
+            "notification_type": n.notification_type,
             "created_at": n.created_at,
-            "sender_info": sender_info,    # kisne bheja
-            "receiver_info": rec_info      # kisko mila
+            "sender_info": sender_info,
+            "receiver_info": receiver_info
         })
 
+    # ────────────── Form Email Logs (Fetch FormType from API) ──────────────
+    forms = FormEmailLog.query.filter_by(receiver_id=receiver_id).all()
+    for f in forms:
+        sender_info = get_user_info_by_id(f.sender_id) if f.sender_id else None
+        form_type_data = None
+
+        # 🔹 Fetch FormType details from AUTH API
+        try:
+            resp = requests.get(f"{AUTH_API_BASE}/{f.form_type_id}", timeout=8)
+            if resp.status_code == 200:
+                api_data = resp.json()
+                form_type_data = {
+                    "id": api_data.get("id"),
+                    "name": api_data.get("name"),
+                    "display_name": api_data.get("display_name"),
+                    "description": api_data.get("description"),
+                    "assigned_users": api_data.get("users", [])
+                }
+            else:
+                print(f"⚠️ Failed to fetch form_type {f.form_type_id}: {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching form_type from AUTH API: {e}")
+
+        combined.append({
+            "id": f.id,
+            "source": "form",
+            "form_type": form_type_data,
+            "email_type": f.email_type,
+            "message": f.message,
+            "status": f.status,
+            "created_at": f.created_at,
+            "sender_info": sender_info,
+            "receiver_info": receiver_info
+        })
+
+    # ────────────── Sort & Paginate ──────────────
+    combined.sort(key=lambda x: x["created_at"], reverse=True)
+    total = len(combined)
+    start = (page - 1) * per_page
+    end = start + per_page
+    paginated = combined[start:end]
+
     return jsonify({
-        # "receiver_info": receiver_info,   # logged-in user info
-        "notifications": result,
+        "notifications": paginated,
         "pagination": {
-            "page": pagination.page,
-            "per_page": pagination.per_page,
-            "total": pagination.total,
-            "pages": pagination.pages
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page
         }
     }), 200
-
 
 
 

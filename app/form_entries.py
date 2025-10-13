@@ -8,7 +8,6 @@ from app.model import (
     FormEntry,
     FormFieldValue,
     FormEmailRecipient,
-    FormType,
     FormTypeUserNoti,
     FormEmailLog
 )

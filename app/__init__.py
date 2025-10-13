@@ -40,7 +40,7 @@ def create_app(config_path: str | None = None):
     from app.dashboard_routes import dashboard_bp
     from app.ticket_stats import stats_bp
     from app.form_entries import form_entries_blueprint
-    from app.form_types import form_types_blueprint
+    # from app.form_types import form_types_blueprint
 
     app.register_blueprint(ticket_bp, url_prefix="/api")
     app.register_blueprint(category_bp, url_prefix="/api")
@@ -48,7 +48,7 @@ def create_app(config_path: str | None = None):
     app.register_blueprint(dashboard_bp, url_prefix="/api")
     app.register_blueprint(stats_bp, url_prefix="/api")
     app.register_blueprint(form_entries_blueprint, url_prefix="/api")
-    app.register_blueprint(form_types_blueprint, url_prefix="/api")
+    # app.register_blueprint(form_types_blueprint, url_prefix="/api")
 
     # 5) health route
     @app.route("/")
