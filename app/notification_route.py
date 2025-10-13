@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Ticket, TicketNotification, FormEmailLog, FormType, FormEntry
+from app.model import Ticket, TicketNotification, FormEmailLog
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime
-
+import os
+import requests
 
 
 
@@ -13,6 +14,7 @@ notification_bp = Blueprint("notifications", __name__, url_prefix="notifications
 # ───────────────────────────────
 # Create Notification function
 # ───────────────────────────────
+AUTH_API_BASE = "https://api.dental360grp.com/api/form_types"
 
 def create_notification(ticket_id, receiver_id, sender_id, notification_type, message=None):
     """Create a new ticket notification"""
@@ -65,15 +67,33 @@ def get_notifications():
             "receiver_info": receiver_info
         })
 
-    # ────────────── Form Email Logs ──────────────
+    # ────────────── Form Email Logs (Fetch FormType from API) ──────────────
     forms = FormEmailLog.query.filter_by(receiver_id=receiver_id).all()
     for f in forms:
-        form_type = FormType.query.get(f.form_type_id)
         sender_info = get_user_info_by_id(f.sender_id) if f.sender_id else None
+        form_type_data = None
+
+        # 🔹 Fetch FormType details from AUTH API
+        try:
+            resp = requests.get(f"{AUTH_API_BASE}/{f.form_type_id}", timeout=8)
+            if resp.status_code == 200:
+                api_data = resp.json()
+                form_type_data = {
+                    "id": api_data.get("id"),
+                    "name": api_data.get("name"),
+                    "display_name": api_data.get("display_name"),
+                    "description": api_data.get("description"),
+                    "assigned_users": api_data.get("users", [])
+                }
+            else:
+                print(f"⚠️ Failed to fetch form_type {f.form_type_id}: {resp.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching form_type from AUTH API: {e}")
+
         combined.append({
             "id": f.id,
             "source": "form",
-            "form_type": form_type.name if form_type else None,
+            "form_type": form_type_data,
             "email_type": f.email_type,
             "message": f.message,
             "status": f.status,
@@ -82,7 +102,7 @@ def get_notifications():
             "receiver_info": receiver_info
         })
 
-    # ────────────── Sort & Slice for Pagination ──────────────
+    # ────────────── Sort & Paginate ──────────────
     combined.sort(key=lambda x: x["created_at"], reverse=True)
     total = len(combined)
     start = (page - 1) * per_page
