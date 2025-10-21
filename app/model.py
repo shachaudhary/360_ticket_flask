@@ -199,7 +199,22 @@ class FormEmailLog(db.Model):
 
 
 
+class ContactFormSubmission(db.Model):
+    __tablename__ = 'contact_form_submissions'
 
+    id = db.Column(db.Integer, primary_key=True)
+    clinic_id = db.Column(db.Integer, nullable=False)
+    form_name = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(255), nullable=True)
+    phone = db.Column(db.String(255), nullable=True)
+    email = db.Column(db.String(255), nullable=True)
+    message = db.Column(db.String(500), nullable=True)
+    data = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    status = db.Column(db.String(50), default='pending', nullable=False)
+
+    def __repr__(self):
+        return f"<ContactFormSubmission id={self.id} form_name='{self.form_name}' clinic_id={self.clinic_id}>"
 # =========================================================================
 
 

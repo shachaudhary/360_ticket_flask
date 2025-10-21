@@ -1,8 +1,9 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Category
+from app.model import Category, ContactFormSubmission
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
+from datetime import datetime, timedelta
 
 category_bp = Blueprint("category_bp", __name__)
 
@@ -167,3 +168,114 @@ def delete_category(category_id):
     db.session.delete(category)
     db.session.commit()
     return jsonify({"success": True, "message": "Category deleted"})
+
+
+# ================================= Contact Form Submission Routes =====================================================
+@category_bp.route("/contact/submit", methods=["POST"])
+def submit_contact_form():
+    try:
+        data = request.get_json(force=True)
+
+        # ✅ Validate required fields
+        required_fields = ["clinic_id"]
+        missing = [f for f in required_fields if not data.get(f)]
+        if missing:
+            return jsonify({
+                "status": "error",
+                "message": f"Missing required field(s): {', '.join(missing)}"
+            }), 400
+
+        # ✅ Create new record
+        form_entry = ContactFormSubmission(
+            clinic_id=data.get("clinic_id"),
+            form_name="contact us",
+            name=data.get("name"),
+            phone=data.get("phone"),
+            email=data.get("email"),
+            message=data.get("message"),
+            data=data.get("data"),
+            status=data.get("status", "pending"),
+            created_at=datetime.utcnow()
+        )
+
+        db.session.add(form_entry)
+        db.session.commit()
+
+        return jsonify({
+            "status": "success",
+            "message": "Contact form submitted successfully.",
+            "form_id": form_entry.id
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        print("❌ Error submitting contact form:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+    
+@category_bp.route("/contact/get_all", methods=["GET"])
+def get_all_contact_forms():
+    
+    try:
+        # 🔹 Required or optional clinic_id
+        clinic_id = request.args.get("clinic_id", type=int)
+        if not clinic_id:
+            return jsonify({
+                "status": "error",
+                "message": "clinic_id is required."
+            }), 400
+
+        # 🔹 Pagination params
+        page = request.args.get("page", default=1, type=int)
+        per_page = request.args.get("per_page", default=10, type=int)
+        per_page = min(max(per_page, 1), 200)  # safe bounds
+
+        # 🔹 Optional search by name
+        search = request.args.get("search", "", type=str).strip()
+
+        query = ContactFormSubmission.query.filter_by(clinic_id=clinic_id)
+
+        if search:
+            query = query.filter(ContactFormSubmission.name.ilike(f"%{search}%"))
+
+        # 🔹 Paginate results
+        pagination = query.order_by(ContactFormSubmission.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+
+        # 🔹 Serialize results
+        forms_data = []
+        for form in pagination.items:
+            forms_data.append({
+                "id": form.id,
+                "clinic_id": form.clinic_id,
+                "form_name": form.form_name,
+                "name": form.name,
+                "phone": form.phone,
+                "email": form.email,
+                "message": form.message,
+                "data": form.data,
+                "status": form.status,
+                "created_at": form.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        return jsonify({
+            "status": "success",
+            "message": "Forms retrieved successfully.",
+            "clinic_id": clinic_id,
+            "page": page,
+            "per_page": per_page,
+            "total": pagination.total,
+            "has_next": pagination.has_next,
+            "has_prev": pagination.has_prev,
+            "forms": forms_data
+        }), 200
+
+    except Exception as e:
+        print("❌ Error fetching contact forms:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
