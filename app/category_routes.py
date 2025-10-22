@@ -217,7 +217,6 @@ def submit_contact_form():
     
 @category_bp.route("/contact/get_all", methods=["GET"])
 def get_all_contact_forms():
-    
     try:
         # 🔹 Required or optional clinic_id
         clinic_id = request.args.get("clinic_id", type=int)
@@ -245,14 +244,24 @@ def get_all_contact_forms():
             page=page, per_page=per_page, error_out=False
         )
 
-        # 🔹 Serialize results
+        # 🔹 Serialize results with name split
         forms_data = []
         for form in pagination.items:
+            # Split name safely
+            first_name, last_name = None, None
+            if form.name:
+                name_parts = form.name.strip().split(" ", 1)
+                first_name = name_parts[0]
+                if len(name_parts) > 1:
+                    last_name = name_parts[1]
+
             forms_data.append({
                 "id": form.id,
                 "clinic_id": form.clinic_id,
                 "form_name": form.form_name,
                 "name": form.name,
+                "first_name": first_name,
+                "last_name": last_name,
                 "phone": form.phone,
                 "email": form.email,
                 "message": form.message,
