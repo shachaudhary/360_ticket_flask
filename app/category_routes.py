@@ -185,11 +185,16 @@ def submit_contact_form():
                 "message": f"Missing required field(s): {', '.join(missing)}"
             }), 400
 
+        # 🧩 Combine first + last name safely
+        first_name = (data.get("first_name") or "").strip()
+        last_name = (data.get("last_name") or "").strip()
+        full_name = f"{first_name} {last_name}".strip() if first_name or last_name else data.get("name")
+
         # ✅ Create new record
         form_entry = ContactFormSubmission(
             clinic_id=data.get("clinic_id"),
-            form_name="contact us",
-            name=data.get("name"),
+            form_name="contact_form",  # consistent with your default
+            name=full_name,
             phone=data.get("phone"),
             email=data.get("email"),
             message=data.get("message"),
@@ -204,7 +209,8 @@ def submit_contact_form():
         return jsonify({
             "status": "success",
             "message": "Contact form submitted successfully.",
-            "form_id": form_entry.id
+            "form_id": form_entry.id,
+            "full_name": full_name
         }), 201
 
     except Exception as e:
@@ -214,7 +220,7 @@ def submit_contact_form():
             "status": "error",
             "message": str(e)
         }), 500
-    
+
 @category_bp.route("/contact/get_all", methods=["GET"])
 def get_all_contact_forms():
     try:
