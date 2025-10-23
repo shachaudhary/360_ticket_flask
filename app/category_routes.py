@@ -294,3 +294,53 @@ def get_all_contact_forms():
             "status": "error",
             "message": str(e)
         }), 500
+
+
+@category_bp.route("/contact/get_by_id/<int:id>", methods=["GET"])
+def get_contact_form_by_id(id):
+    try:
+        # 🔹 Fetch record by ID
+        form = ContactFormSubmission.query.get(id)
+
+        if not form:
+            return jsonify({
+                "status": "error",
+                "message": f"Contact form with ID {id} not found."
+            }), 404
+
+        # 🔹 Split name into first and last
+        first_name, last_name = None, None
+        if form.name:
+            name_parts = form.name.strip().split(" ", 1)
+            first_name = name_parts[0]
+            if len(name_parts) > 1:
+                last_name = name_parts[1]
+
+        # 🔹 Serialize result
+        form_data = {
+            "id": form.id,
+            "clinic_id": form.clinic_id,
+            "form_name": form.form_name,
+            "name": form.name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "phone": form.phone,
+            "email": form.email,
+            "message": form.message,
+            "data": form.data,
+            "status": form.status,
+            "created_at": form.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        return jsonify({
+            "status": "success",
+            "message": "Contact form retrieved successfully.",
+            "form": form_data
+        }), 200
+
+    except Exception as e:
+        print(f"❌ Error fetching contact form ID={id}:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
