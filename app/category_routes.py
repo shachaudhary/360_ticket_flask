@@ -193,7 +193,7 @@ def submit_contact_form():
         # ✅ Create new record
         form_entry = ContactFormSubmission(
             clinic_id=data.get("clinic_id"),
-            form_name="contact_form",  # consistent with your default
+            form_name="Contact Us",  # consistent with your default
             name=full_name,
             phone=data.get("phone"),
             email=data.get("email"),
