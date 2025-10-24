@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Category, ContactFormSubmission, Ticket
+from app.model import Category, ContactFormSubmission, Ticket, ContactFormTicketLink, TicketAssignment, TicketAssignmentLog,TicketFile,TicketComment,TicketStatusLog,TicketTag, TicketFollowUp
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime, timedelta
@@ -224,7 +224,7 @@ def delete_category(category_id):
 import re, json
 # --- helper to analyze message category ---
 def analyze_message_category(app, form_id, message_text):
-    """Background LLM analysis run inside Flask app context and auto-create ticket."""
+    """Background LLM analysis run inside Flask app context and auto-create ticket + link to contact form."""
     with app.app_context():
         try:
             print(f"🧠 Starting category analysis for form_id={form_id}")
@@ -235,7 +235,7 @@ def analyze_message_category(app, form_id, message_text):
                 print("⚠️ No categories found in DB.")
                 return
 
-            # 2️⃣ Build LLM prompt
+            # 2️⃣ Build prompt
             system_prompt = (
                 "You are an AI assistant that classifies dental contact form messages "
                 "into one of the available categories. Respond only with the category name."
@@ -258,68 +258,79 @@ def analyze_message_category(app, form_id, message_text):
 
             raw_content = response.choices[0].message.content.strip()
 
-            # 4️⃣ Trim LLM response safely
+            # 4️⃣ Extract final category name
             match = re.search(
                 r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
                 raw_content,
                 re.DOTALL
             )
             final_message = match.group(1).strip() if match else raw_content.strip()
-
             category_result = final_message.split("\n")[0].strip()
+
             print(f"✅ LLM predicted category: {category_result}")
 
-            # 5️⃣ Save to DB (store as JSON/text safely)
+            # 5️⃣ Save category result to ContactFormSubmission
             form = ContactFormSubmission.query.get(form_id)
-            if form:
-                form.data = json.dumps({"predicted_category": category_result})
-                db.session.commit()
+            if not form:
+                print(f"⚠️ Form ID {form_id} not found.")
+                return
 
-                # 6️⃣ Find matching category
-                matched_category = Category.query.filter(
-                    Category.name.ilike(category_result)
-                ).first()
+            form.data = json.dumps({"predicted_category": category_result})
+            db.session.commit()
 
-                # 7️⃣ Create ticket automatically
-                ticket = Ticket(
-                    clinic_id=form.clinic_id,
-                    title=f"Contact Form: {form.name or 'Unknown'}",
-                    details=form.message or "(no message)",
-                    category_id=matched_category.id if matched_category else None,
-                    status="Pending",
-                    priority="Medium",
-                    due_date=None,
-                    user_id=None,         # you can assign system user id here
-                    location_id=None,     # optional if not available
-                )
-                db.session.add(ticket)
-                db.session.commit()
+            # 6️⃣ Find category
+            matched_category = Category.query.filter(
+                Category.name.ilike(category_result)
+            ).first()
 
-                print(f"🎫 Auto Ticket Created → ID={ticket.id} | Category={category_result}")
+            # 7️⃣ Create new Ticket
+            ticket = Ticket(
+                clinic_id=form.clinic_id,
+                title=f"Contact Form: {form.name or 'Unknown'}",
+                details=form.message or "(no message)",
+                category_id=matched_category.id if matched_category else None,
+                status="Pending",
+                priority="Medium",
+                due_date=None,
+                user_id=None,
+                location_id=None,
+            )
+            db.session.add(ticket)
+            db.session.commit()
 
-                # (Optional) if category has assignee → auto assign ticket
-                if matched_category and matched_category.assignee_id:
-                    from app.ticket_routes import TicketAssignment, get_user_info_by_id, send_assign_email, create_notification
-                    
-                    assignee_info = get_user_info_by_id(matched_category.assignee_id)
-                    if assignee_info:
-                        assignment = TicketAssignment(
-                            ticket_id=ticket.id,
-                            assign_to=matched_category.assignee_id,
-                            assign_by=None  # system
-                        )
-                        db.session.add(assignment)
-                        db.session.commit()
+            print(f"🎫 Auto Ticket Created → ID={ticket.id} | Category={category_result}")
 
-                        # send assign email
-                        send_assign_email(ticket, assignee_info, {"username": "System"})
-                        create_notification(
-                            ticket_id=ticket.id,
-                            receiver_id=matched_category.assignee_id,
-                            sender_id=None,
-                            notification_type="assign",
-                            message=f"Auto-assigned to you for category {category_result}"
-                        )
+            # 8️⃣ Store link between ContactForm and Ticket
+            link = ContactFormTicketLink(
+                contact_form_id=form.id,
+                ticket_id=ticket.id
+            )
+            db.session.add(link)
+            db.session.commit()
+            print(f"🔗 Linked ContactForm ID={form.id} with Ticket ID={ticket.id}")
+
+            # 9️⃣ Optional: auto-assign if category has assignee
+            if matched_category and matched_category.assignee_id:
+                from app.ticket_routes import TicketAssignment, get_user_info_by_id, send_assign_email, create_notification
+
+                assignee_info = get_user_info_by_id(matched_category.assignee_id)
+                if assignee_info:
+                    assignment = TicketAssignment(
+                        ticket_id=ticket.id,
+                        assign_to=matched_category.assignee_id,
+                        assign_by=None  # System-generated
+                    )
+                    db.session.add(assignment)
+                    db.session.commit()
+
+                    send_assign_email(ticket, assignee_info, {"username": "System"})
+                    create_notification(
+                        ticket_id=ticket.id,
+                        receiver_id=matched_category.assignee_id,
+                        sender_id=None,
+                        notification_type="assign",
+                        message=f"Auto-assigned to you for category {category_result}"
+                    )
 
         except Exception as e:
             print(f"❌ Error in analyze_message_category: {e}")
@@ -460,28 +471,139 @@ def get_all_contact_forms():
             "message": str(e)
         }), 500
 
+def _serialize_ticket(ticket):
+    created_by = get_user_info_by_id(ticket.user_id) if ticket.user_id else None
+
+    # Assignments (current)
+    assignments = TicketAssignment.query.filter_by(ticket_id=ticket.id).all()
+    assignees = []
+    for a in assignments:
+        assign_by_info = get_user_info_by_id(a.assign_by) if a.assign_by else None
+        assign_to_info = get_user_info_by_id(a.assign_to) if a.assign_to else None
+        assignees.append({
+            "assign_by": a.assign_by,
+            "assign_by_username": assign_by_info["username"] if assign_by_info else None,
+            "assign_to": a.assign_to,
+            "assign_to_username": assign_to_info["username"] if assign_to_info else None,
+            "assigned_at": a.assigned_at
+        })
+
+    # Assignment logs (history)
+    assignment_logs = []
+    for log in TicketAssignmentLog.query.filter_by(ticket_id=ticket.id).order_by(TicketAssignmentLog.changed_at.desc()).all():
+        old_user_info = get_user_info_by_id(log.old_assign_to) if log.old_assign_to else None
+        new_user_info = get_user_info_by_id(log.new_assign_to) if log.new_assign_to else None
+        changed_by_info = get_user_info_by_id(log.changed_by) if log.changed_by else None
+        assignment_logs.append({
+            "old_assign_to": log.old_assign_to,
+            "old_assign_to_username": old_user_info["username"] if old_user_info else None,
+            "new_assign_to": log.new_assign_to,
+            "new_assign_to_username": new_user_info["username"] if new_user_info else None,
+            "changed_by": log.changed_by,
+            "changed_by_username": changed_by_info["username"] if changed_by_info else None,
+            "changed_at": log.changed_at
+        })
+
+    # Files, Tags, Comments, Followups
+    files = [{"name": f.file_name, "url": f.file_url}
+             for f in TicketFile.query.filter_by(ticket_id=ticket.id).all()]
+
+    tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=ticket.id).all()]
+
+    comments = []
+    for c in TicketComment.query.filter_by(ticket_id=ticket.id).order_by(TicketComment.created_at.desc()).all():
+        u_info = get_user_info_by_id(c.user_id) if c.user_id else None
+        comments.append({
+            "user_id": c.user_id,
+            "username": u_info["username"] if u_info else None,
+            "comment": c.comment,
+            "created_at": c.created_at
+        })
+
+    followups = []
+    for f in TicketFollowUp.query.filter_by(ticket_id=ticket.id).all():
+        u_info = get_user_info_by_id(f.user_id)
+        followups.append({
+            "id": f.id,
+            "note": f.note,
+            "user_id": f.user_id,
+            "username": u_info["username"] if u_info else None,
+            "followup_date": f.followup_date,
+            "created_at": f.created_at
+        })
+
+    # Category
+    category = None
+    if getattr(ticket, "category_id", None):
+        cat = Category.query.get(ticket.category_id)
+        if cat:
+            category = {"id": cat.id, "name": cat.name, "is_active": cat.is_active}
+
+    # Status logs
+    status_logs = []
+    for log in TicketStatusLog.query.filter_by(ticket_id=ticket.id).order_by(TicketStatusLog.changed_at.desc()).all():
+        u_info = get_user_info_by_id(log.changed_by) if log.changed_by else None
+        status_logs.append({
+            "old_status": log.old_status,
+            "new_status": log.new_status,
+            "changed_by": log.changed_by,
+            "changed_by_username": u_info["username"] if u_info else None,
+            "changed_at": log.changed_at
+        })
+
+    return {
+        "id": ticket.id,
+        "title": ticket.title,
+        "details": ticket.details,
+        "priority": ticket.priority,
+        "status": ticket.status,
+        "due_date": ticket.due_date,
+        "created_at": ticket.created_at,
+        "completed_at": ticket.completed_at,
+        "created_by": created_by,
+        "assignees": assignees,
+        "assignment_logs": assignment_logs,
+        "files": files,
+        "tags": tags,
+        "comments": comments,
+        "followups": followups,
+        "category": category,
+        "status_logs": status_logs
+    }
 
 @category_bp.route("/contact/get_by_id/<int:id>", methods=["GET"])
 def get_contact_form_by_id(id):
     try:
-        # 🔹 Fetch record by ID
         form = ContactFormSubmission.query.get(id)
-
         if not form:
-            return jsonify({
-                "status": "error",
-                "message": f"Contact form with ID {id} not found."
-            }), 404
+            return jsonify({"status": "error", "message": f"Contact form with ID {id} not found."}), 404
 
-        # 🔹 Split name into first and last
+        # split name
         first_name, last_name = None, None
         if form.name:
-            name_parts = form.name.strip().split(" ", 1)
-            first_name = name_parts[0]
-            if len(name_parts) > 1:
-                last_name = name_parts[1]
+            parts = form.name.strip().split(" ", 1)
+            first_name = parts[0]
+            if len(parts) > 1:
+                last_name = parts[1]
 
-        # 🔹 Serialize result
+        # parse 'data' if it’s JSON text
+        data_field = form.data
+        try:
+            if isinstance(data_field, str):
+                data_field = json.loads(data_field)
+        except Exception:
+            pass
+
+        # --- fetch linked ticket ids
+        links = ContactFormTicketLink.query.filter_by(contact_form_id=form.id).all()
+        ticket_ids = [l.ticket_id for l in links]
+
+        # --- load tickets & serialize
+        tickets = []
+        if ticket_ids:
+            for t in Ticket.query.filter(Ticket.id.in_(ticket_ids)).all():
+                tickets.append(_serialize_ticket(t))
+
         form_data = {
             "id": form.id,
             "clinic_id": form.clinic_id,
@@ -492,9 +614,12 @@ def get_contact_form_by_id(id):
             "phone": form.phone,
             "email": form.email,
             "message": form.message,
-            "data": form.data,
+            "data": data_field,
             "status": form.status,
+            "assigned_to": getattr(form, "assigned_to", None),
             "created_at": form.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "ticket_links": [{"ticket_id": tid} for tid in ticket_ids],  # explicit ids
+            "tickets": tickets                                        # full ticket payloads
         }
 
         return jsonify({
@@ -505,7 +630,4 @@ def get_contact_form_by_id(id):
 
     except Exception as e:
         print(f"❌ Error fetching contact form ID={id}:", e)
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500

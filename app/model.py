@@ -218,4 +218,18 @@ class ContactFormSubmission(db.Model):
 # =========================================================================
 
 
+class ContactFormTicketLink(db.Model):
+    __tablename__ = "contact_form_ticket_links"
+
+    id = db.Column(db.Integer, primary_key=True)
+    contact_form_id = db.Column(db.Integer, db.ForeignKey("contact_form_submissions.id"), nullable=False)
+    ticket_id = db.Column(db.Integer, db.ForeignKey("tickets.id"), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # optional relationships
+    contact_form = db.relationship("ContactFormSubmission", backref="ticket_link", uselist=False)
+    ticket = db.relationship("Ticket", backref="contact_form_link", uselist=False)
+
+    def __repr__(self):
+        return f"<ContactFormTicketLink form_id={self.contact_form_id} ticket_id={self.ticket_id}>"
 
