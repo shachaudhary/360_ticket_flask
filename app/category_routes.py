@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Category, ContactFormSubmission
+from app.model import Category, ContactFormSubmission, Ticket
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime, timedelta
-
+from app import llm_client
+import threading
 category_bp = Blueprint("category_bp", __name__)
 
 # ───────────────────────────────
@@ -171,6 +172,160 @@ def delete_category(category_id):
 
 
 # ================================= Contact Form Submission Routes =====================================================
+# @category_bp.route("/contact/submit", methods=["POST"])
+# def submit_contact_form():
+#     try:
+#         data = request.get_json(force=True)
+
+#         # ✅ Validate required fields
+#         required_fields = ["clinic_id"]
+#         missing = [f for f in required_fields if not data.get(f)]
+#         if missing:
+#             return jsonify({
+#                 "status": "error",
+#                 "message": f"Missing required field(s): {', '.join(missing)}"
+#             }), 400
+
+#         # 🧩 Combine first + last name safely
+#         first_name = (data.get("first_name") or "").strip()
+#         last_name = (data.get("last_name") or "").strip()
+#         full_name = f"{first_name} {last_name}".strip() if first_name or last_name else data.get("name")
+
+#         # ✅ Create new record
+#         form_entry = ContactFormSubmission(
+#             clinic_id=data.get("clinic_id"),
+#             form_name="Contact Us",  # consistent with your default
+#             name=full_name,
+#             phone=data.get("phone"),
+#             email=data.get("email"),
+#             message=data.get("message"),
+#             data=data.get("data"),
+#             status=data.get("status", "pending"),
+#             created_at=datetime.utcnow()
+#         )
+
+#         db.session.add(form_entry)
+#         db.session.commit()
+
+#         return jsonify({
+#             "status": "success",
+#             "message": "Contact form submitted successfully.",
+#             "form_id": form_entry.id,
+#             "full_name": full_name
+#         }), 201
+
+#     except Exception as e:
+#         db.session.rollback()
+#         print("❌ Error submitting contact form:", e)
+#         return jsonify({
+#             "status": "error",
+#             "message": str(e)
+#         }), 500
+import re, json
+# --- helper to analyze message category ---
+def analyze_message_category(app, form_id, message_text):
+    """Background LLM analysis run inside Flask app context and auto-create ticket."""
+    with app.app_context():
+        try:
+            print(f"🧠 Starting category analysis for form_id={form_id}")
+
+            # 1️⃣ Fetch active categories
+            categories = [c.name for c in Category.query.filter_by(is_active=True).all()]
+            if not categories:
+                print("⚠️ No categories found in DB.")
+                return
+
+            # 2️⃣ Build LLM prompt
+            system_prompt = (
+                "You are an AI assistant that classifies dental contact form messages "
+                "into one of the available categories. Respond only with the category name."
+            )
+            user_prompt = f"""
+            Available categories: {', '.join(categories)}
+            Message: "{message_text}"
+            Which category best fits this message?
+            """
+
+            # 3️⃣ Call LLM
+            response = llm_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
+
+            raw_content = response.choices[0].message.content.strip()
+
+            # 4️⃣ Trim LLM response safely
+            match = re.search(
+                r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
+                raw_content,
+                re.DOTALL
+            )
+            final_message = match.group(1).strip() if match else raw_content.strip()
+
+            category_result = final_message.split("\n")[0].strip()
+            print(f"✅ LLM predicted category: {category_result}")
+
+            # 5️⃣ Save to DB (store as JSON/text safely)
+            form = ContactFormSubmission.query.get(form_id)
+            if form:
+                form.data = json.dumps({"predicted_category": category_result})
+                db.session.commit()
+
+                # 6️⃣ Find matching category
+                matched_category = Category.query.filter(
+                    Category.name.ilike(category_result)
+                ).first()
+
+                # 7️⃣ Create ticket automatically
+                ticket = Ticket(
+                    clinic_id=form.clinic_id,
+                    title=f"Contact Form: {form.name or 'Unknown'}",
+                    details=form.message or "(no message)",
+                    category_id=matched_category.id if matched_category else None,
+                    status="Pending",
+                    priority="Medium",
+                    due_date=None,
+                    user_id=None,         # you can assign system user id here
+                    location_id=None,     # optional if not available
+                )
+                db.session.add(ticket)
+                db.session.commit()
+
+                print(f"🎫 Auto Ticket Created → ID={ticket.id} | Category={category_result}")
+
+                # (Optional) if category has assignee → auto assign ticket
+                if matched_category and matched_category.assignee_id:
+                    from app.ticket_routes import TicketAssignment, get_user_info_by_id, send_assign_email, create_notification
+                    
+                    assignee_info = get_user_info_by_id(matched_category.assignee_id)
+                    if assignee_info:
+                        assignment = TicketAssignment(
+                            ticket_id=ticket.id,
+                            assign_to=matched_category.assignee_id,
+                            assign_by=None  # system
+                        )
+                        db.session.add(assignment)
+                        db.session.commit()
+
+                        # send assign email
+                        send_assign_email(ticket, assignee_info, {"username": "System"})
+                        create_notification(
+                            ticket_id=ticket.id,
+                            receiver_id=matched_category.assignee_id,
+                            sender_id=None,
+                            notification_type="assign",
+                            message=f"Auto-assigned to you for category {category_result}"
+                        )
+
+        except Exception as e:
+            print(f"❌ Error in analyze_message_category: {e}")
+
+
+# --- Contact Form Submit Endpoint ---
 @category_bp.route("/contact/submit", methods=["POST"])
 def submit_contact_form():
     try:
@@ -190,10 +345,10 @@ def submit_contact_form():
         last_name = (data.get("last_name") or "").strip()
         full_name = f"{first_name} {last_name}".strip() if first_name or last_name else data.get("name")
 
-        # ✅ Create new record
+        # ✅ Save record
         form_entry = ContactFormSubmission(
             clinic_id=data.get("clinic_id"),
-            form_name="Contact Us",  # consistent with your default
+            form_name="Contact Us",
             name=full_name,
             phone=data.get("phone"),
             email=data.get("email"),
@@ -205,6 +360,16 @@ def submit_contact_form():
 
         db.session.add(form_entry)
         db.session.commit()
+
+        # ✅ Start analysis thread with app context
+        from flask import current_app
+        app = current_app._get_current_object()
+
+        threading.Thread(
+            target=analyze_message_category,
+            args=(app, form_entry.id, data.get("message")),
+            daemon=True
+        ).start()
 
         return jsonify({
             "status": "success",
@@ -220,7 +385,7 @@ def submit_contact_form():
             "status": "error",
             "message": str(e)
         }), 500
-
+    
 @category_bp.route("/contact/get_all", methods=["GET"])
 def get_all_contact_forms():
     try:

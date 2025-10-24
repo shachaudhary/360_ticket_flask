@@ -7,11 +7,15 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-
+from openai import OpenAI
 # ─── shared extensions ───────────────────────────────────────────
 db = SQLAlchemy()
 migrate = Migrate()
 
+llm_client = OpenAI(
+    base_url="https://vidt5lotflkna9-8000.proxy.runpod.net/v1/",
+    api_key="389e5f28-62d0-46c6-9cbc-0099da90ff30"  # dummy key, Ollama doesn't validate it
+)
 
 # ─── factory ─────────────────────────────────────────────────────
 def create_app(config_path: str | None = None):
