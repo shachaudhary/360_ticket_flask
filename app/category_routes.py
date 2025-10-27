@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from app import llm_client
 import threading
 category_bp = Blueprint("category_bp", __name__)
+AUTH_SYSTEM_URL = "https://api.dental360grp.com/api"
 
 # ───────────────────────────────
 # Get all categories (default: only active)
@@ -335,8 +336,8 @@ def analyze_message_category(app, form_id, message_text):
         except Exception as e:
             print(f"❌ Error in analyze_message_category: {e}")
 
-
-# --- Contact Form Submit Endpoint ---
+import threading, requests
+from flask import current_app
 @category_bp.route("/contact/submit", methods=["POST"])
 def submit_contact_form():
     try:
@@ -356,7 +357,7 @@ def submit_contact_form():
         last_name = (data.get("last_name") or "").strip()
         full_name = f"{first_name} {last_name}".strip() if first_name or last_name else data.get("name")
 
-        # ✅ Save record
+        # ✅ Save record locally
         form_entry = ContactFormSubmission(
             clinic_id=data.get("clinic_id"),
             form_name="Contact Us",
@@ -372,16 +373,76 @@ def submit_contact_form():
         db.session.add(form_entry)
         db.session.commit()
 
-        # ✅ Start analysis thread with app context
+        # ✅ Capture app and headers before leaving request context
         from flask import current_app
         app = current_app._get_current_object()
 
+        headers = {
+            "x-api-key": request.headers.get("x-api-key", ""),
+            "Authorization": request.headers.get("Authorization", ""),
+            "Content-Type": "application/json"
+        }
+
+        # -----------------------------
+        # 🧠 Thread 1 → Analyze category
+        # -----------------------------
         threading.Thread(
             target=analyze_message_category,
             args=(app, form_entry.id, data.get("message")),
             daemon=True
         ).start()
 
+        # -----------------------------
+        # 🧩 Thread 2 → Create patient in AUTH SYSTEM
+        # -----------------------------
+        def create_patient_in_auth(app, form_data, headers):
+            with app.app_context():
+                try:
+                    # ✅ Safely normalize data field
+                    form_data_dict = {}
+                    if form_data.data:
+                        if isinstance(form_data.data, str):
+                            try:
+                                form_data_dict = json.loads(form_data.data)
+                                if not isinstance(form_data_dict, dict):
+                                    form_data_dict = {}
+                            except Exception:
+                                form_data_dict = {}
+                        elif isinstance(form_data.data, dict):
+                            form_data_dict = form_data.data
+
+                    # ✅ Build payload safely
+                    payload = {
+                        "name": form_data.name,
+                        "phone": form_data.phone,
+                        "email": form_data.email,
+                        "clinic_id": form_data.clinic_id,
+                        "address": form_data_dict.get("address"),
+                        "state": form_data_dict.get("state"),
+                        "postal_code": form_data_dict.get("postal_code"),
+                        "insurance_name": form_data_dict.get("insurance_name"),
+                        "insurance_no": form_data_dict.get("insurance_no"),
+                    }
+
+                    url = f"{AUTH_SYSTEM_URL}/patient"
+                    print(f"🌐 Sending patient creation payload: {payload}")
+                    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+
+                    if resp.status_code in (200, 201):
+                        print(f"✅ Patient created successfully in Auth API → {form_data.name}")
+                    else:
+                        print(f"⚠️ Patient creation failed ({resp.status_code}): {resp.text}")
+                except Exception as ex:
+                    print(f"❌ Error creating patient in Auth System: {ex}")
+
+
+        threading.Thread(
+            target=create_patient_in_auth,
+            args=(app, form_entry, headers),
+            daemon=True
+        ).start()
+
+        # ✅ Return immediate response
         return jsonify({
             "status": "success",
             "message": "Contact form submitted successfully.",
@@ -396,7 +457,7 @@ def submit_contact_form():
             "status": "error",
             "message": str(e)
         }), 500
-    
+  
 @category_bp.route("/contact/get_all", methods=["GET"])
 def get_all_contact_forms():
     try:
