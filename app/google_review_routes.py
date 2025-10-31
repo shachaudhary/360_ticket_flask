@@ -24,7 +24,7 @@ BUSINESS_PROFILE_ID = "14878371824930493439"
 CLIENT_ID = "1035023216305-71mirf8qjof7metku95l9uebsboq87ic.apps.googleusercontent.com"
 CLIENT_SECRET = "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"
 SCOPES = ["https://www.googleapis.com/auth/business.manage"]
-REDIRECT_URI = "https://acafe694ba63.ngrok-free.app/api/oauth2callback"
+REDIRECT_URI = "https://support.dental360grp.com/api/oauth2callback"
 TOKEN_FILE = "google_token.json"
 
 
