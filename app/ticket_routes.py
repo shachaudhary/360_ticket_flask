@@ -25,7 +25,7 @@ ticket_bp = Blueprint("tickets", __name__, url_prefix="/api/tickets")
 # Create Ticket with files and @username tags
 @ticket_bp.route("/ticket", methods=["POST"])
 @require_api_key
-@validate_token
+# @validate_token
 def create_ticket():
     data = request.form
 

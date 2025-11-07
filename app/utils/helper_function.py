@@ -7,8 +7,8 @@ from aiohttp import BasicAuth
 import asyncio
 import os
 import requests
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog,EmailLog
-from flask import current_app
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog,EmailLog  
+
 
 # ─── S3 Config ──────────────────────────────────────────────
 S3_BUCKET      = os.getenv("S3_BUCKET")
@@ -41,54 +41,107 @@ def upload_to_s3(f, folder="tickets"):
     return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
 # ─── Helper: Send email (dummy) ─────────────────────────────
+from datetime import datetime
+from flask import current_app
+from app import db
+from app.model import EmailLog
+import requests
+
+
+def log_email(to, subject, body_html=None, body_text=None,
+              response_text=None, status_code=None, success=False):
+    """
+    Save a record in the EmailLog table safely — works even inside threads.
+    """
+    from flask import current_app
+    try:
+        # get actual Flask app instance (thread-safe)
+        flask_app = current_app._get_current_object()
+    except Exception:
+        from app import create_app
+        flask_app = create_app()  # fallback if running outside request context
+
+    with flask_app.app_context():
+        try:
+            log_entry = EmailLog(
+                to=str(to).strip(),
+                subject=subject,
+                body_html=body_html,
+                body_text=body_text,
+                mailgun_response=response_text,
+                status_code=status_code,
+                success=success,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(log_entry)
+            db.session.commit()
+            print(f"🪵 EmailLog saved → {to} | status={status_code} | success={success}")
+        except Exception as e:
+            db.session.rollback()
+            print(f"⚠️ Failed to save EmailLog: {e}")
+
 
 def send_email(to, subject, body_html, body_text=None):
+    """
+    Send email via Mailgun synchronously and log results in EmailLog.
+    Works safely from threads or within requests.
+    """
+    from flask import current_app
+    try:
+        flask_app = current_app._get_current_object()
+    except Exception:
+        from app import create_app
+        flask_app = create_app()  # fallback if running outside of request
 
     data = {
         "from": "support@360dentalbillingsolutions.com",
-        "to": to,
+        "to": str(to).strip(),
         "subject": subject,
-        "html": body_html
+        "html": body_html,
     }
     if body_text:
         data["text"] = body_text
 
-    log_entry = EmailLog(
-        to=to,
-        subject=subject,
-        body_html=body_html,
-        body_text=body_text,
-        created_at=datetime.utcnow()
-    )
+    # ✅ open a safe context for all operations (Mailgun + DB logging)
+    with flask_app.app_context():
+        try:
+            response = requests.post(
+                flask_app.config.get("MAILGUN_API_URL", MAILGUN_API_URL),
+                auth=("api", flask_app.config.get("MAILGUN_API_KEY", MAILGUN_API_KEY)),
+                data=data,
+                timeout=30,
+            )
 
-    try:
-        response = requests.post(
-            MAILGUN_API_URL,
-            auth=("api", MAILGUN_API_KEY),
-            data=data,
-            timeout=30
-        )
-        log_entry.status_code = response.status_code
-        log_entry.mailgun_response = response.text
-        log_entry.success = (response.status_code == 200)
-        print(f"📧 Mailgun response: {response.status_code} - {response.text[:300]}")
+            log_email(
+                to=to,
+                subject=subject,
+                body_html=body_html,
+                body_text=body_text,
+                response_text=response.text,
+                status_code=response.status_code,
+                success=(response.status_code == 200),
+            )
 
-    except Exception as e:
-        log_entry.mailgun_response = f"Exception: {str(e)}"
-        log_entry.success = False
-        print(f"⚠️ Email sending failed: {e}")
+            if response.status_code == 200:
+                print(f"✅ Email successfully sent to {to}")
+                return True
+            else:
+                print(f"❌ Failed to send email: {response.status_code} - {response.text}")
+                return False
 
-    # ✅ Safely log inside app context even when running in a background thread
-    try:
-        with current_app.app_context():
-            db.session.add(log_entry)
-            db.session.commit()
-    except Exception as db_err:
-        with current_app.app_context():
-            db.session.rollback()
-        print(f"⚠️ Failed to log email: {db_err}")
+        except Exception as e:
+            print(f"⚠️ Email sending failed: {e}")
+            log_email(
+                to=to,
+                subject=subject,
+                body_html=body_html,
+                body_text=body_text,
+                response_text=str(e),
+                status_code=None,
+                success=False,
+            )
+            return False
 
-    return log_entry.success
 # ─── Helper: Get user info from external API ────────────────
 def get_user_info_by_id(user_id):
     try:
