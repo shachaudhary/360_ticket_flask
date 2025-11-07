@@ -8,7 +8,7 @@ import asyncio
 import os
 import requests
 from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog,EmailLog
-
+from flask import current_app
 
 # ─── S3 Config ──────────────────────────────────────────────
 S3_BUCKET      = os.getenv("S3_BUCKET")
