@@ -233,3 +233,15 @@ class ContactFormTicketLink(db.Model):
     def __repr__(self):
         return f"<ContactFormTicketLink form_id={self.contact_form_id} ticket_id={self.ticket_id}>"
 
+class EmailLog(db.Model):
+    __tablename__ = "email_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    to = db.Column(db.String(255), nullable=False)
+    subject = db.Column(db.String(500), nullable=True)
+    body_html = db.Column(db.Text, nullable=True)
+    body_text = db.Column(db.Text, nullable=True)
+    mailgun_response = db.Column(db.Text, nullable=True)
+    status_code = db.Column(db.Integer, nullable=True)
+    success = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

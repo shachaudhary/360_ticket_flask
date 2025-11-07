@@ -7,7 +7,7 @@ from aiohttp import BasicAuth
 import asyncio
 import os
 import requests
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, TicketStatusLog, TicketAssignmentLog,EmailLog
 
 
 # ─── S3 Config ──────────────────────────────────────────────
@@ -44,7 +44,7 @@ def upload_to_s3(f, folder="tickets"):
 
 def send_email(to, subject, body_html, body_text=None):
     """
-    Send email via Mailgun synchronously with HTML + optional text fallback.
+    Send email via Mailgun and log all attempts with response.
     """
     data = {
         "from": "support@360dentalbillingsolutions.com",
@@ -55,6 +55,13 @@ def send_email(to, subject, body_html, body_text=None):
     if body_text:
         data["text"] = body_text
 
+    log_entry = EmailLog(
+        to=to,
+        subject=subject,
+        body_html=body_html,
+        body_text=body_text,
+    )
+
     try:
         response = requests.post(
             MAILGUN_API_URL,
@@ -62,15 +69,30 @@ def send_email(to, subject, body_html, body_text=None):
             data=data,
             timeout=30
         )
-        if response.status_code == 200:
+
+        log_entry.status_code = response.status_code
+        log_entry.mailgun_response = response.text
+        log_entry.success = (response.status_code == 200)
+
+        if log_entry.success:
             print(f"✅ Email successfully sent to {to}")
-            return True
         else:
             print(f"❌ Failed to send email: {response.status_code} - {response.text}")
-            return False
+
     except Exception as e:
+        log_entry.mailgun_response = f"Exception: {str(e)}"
+        log_entry.success = False
         print(f"⚠️ Email sending failed: {e}")
-        return False
+
+    # Save the log no matter what
+    try:
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as db_err:
+        db.session.rollback()
+        print(f"⚠️ Failed to log email: {db_err}")
+
+    return log_entry.success
 
 
 # ─── Helper: Get user info from external API ────────────────

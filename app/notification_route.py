@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.model import Ticket, TicketNotification, FormEmailLog
+from app.model import Ticket, TicketNotification, FormEmailLog, EmailLog
 from app.utils.helper_function import get_user_info_by_id
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime
@@ -176,3 +176,17 @@ def clear_notifications():
         "deleted_count": deleted,
         "message": f"{deleted} notifications deleted for user {user_id}"
     }), 200
+
+
+
+@notification_bp.route("/email_logs", methods=["GET"])
+@require_api_key
+def get_email_logs():
+    logs = EmailLog.query.order_by(EmailLog.created_at.desc()).limit(50).all()
+    return jsonify([{
+        "to": l.to,
+        "subject": l.subject,
+        "success": l.success,
+        "status_code": l.status_code,
+        "created_at": l.created_at.strftime("%Y-%m-%d %H:%M:%S")
+    } for l in logs])
