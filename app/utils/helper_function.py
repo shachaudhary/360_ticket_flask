@@ -1,4 +1,5 @@
 import os, uuid, mimetypes, botocore, boto3, requests
+from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from app import db
@@ -17,6 +18,10 @@ AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 MAILGUN_API_URL = os.getenv("MAILGUN_API_URL")
 MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY") 
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID")
+MICROSOFT_SENDER_EMAIL = "support@dental360grp.com"
 
 s3 = boto3.client(
     "s3",
@@ -41,106 +46,233 @@ def upload_to_s3(f, folder="tickets"):
     return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
 # ─── Helper: Send email (dummy) ─────────────────────────────
-from datetime import datetime
-from flask import current_app
-from app import db
-from app.model import EmailLog
-import requests
+# from datetime import datetime
+# from flask import current_app
+# from app import db
+# from app.model import EmailLog
+# import requests
 
 
-def log_email(to, subject, body_html=None, body_text=None,
-              response_text=None, status_code=None, success=False):
+GRAPH_TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+
+
+def get_graph_token():
     """
-    Save a record in the EmailLog table safely — works even inside threads.
+    Get an access token from Microsoft Graph using client credentials.
     """
-    from flask import current_app
     try:
-        # get actual Flask app instance (thread-safe)
+        tenant_id = MICROSOFT_TENANT_ID
+        client_id = MICROSOFT_CLIENT_ID
+        client_secret = MICROSOFT_CLIENT_SECRET
+
+        token_url = GRAPH_TOKEN_URL.format(tenant_id=tenant_id)
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default"
+        }
+
+        response = requests.post(token_url, data=data, timeout=30)
+        response.raise_for_status()
+        token = response.json().get("access_token")
+        if not token:
+            raise Exception("No access_token found in Graph response")
+        return token
+
+    except Exception as e:
+        print(f"⚠️ Failed to get Microsoft Graph token: {e}")
+        return None
+
+
+def send_email(to, subject, body_html, body_text=None):
+    """
+    Send email via Microsoft Graph API and log results in EmailLog.
+    Replaces Mailgun version completely.
+    """
+    from app.model import db, EmailLog
+    from app import create_app
+
+    try:
         flask_app = current_app._get_current_object()
     except Exception:
-        from app import create_app
-        flask_app = create_app()  # fallback if running outside request context
+        flask_app = create_app()
 
     with flask_app.app_context():
         try:
+            token = get_graph_token()
+            if not token:
+                raise Exception("Microsoft Graph token unavailable")
+
+            # Prepare message payload
+            message = {
+                "message": {
+                    "subject": subject,
+                    "body": {
+                        "contentType": "HTML" if body_html else "Text",
+                        "content": body_html or body_text,
+                    },
+                    "toRecipients": [{"emailAddress": {"address": str(to).strip()}}],
+                },
+                "saveToSentItems": True,
+            }
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+
+            # Sender email from config (the mailbox you're authorized for)
+            sender_email = flask_app.config.get(
+                "MICROSOFT_SENDER_EMAIL", "support@dental360grp.com"
+            )
+
+            url = f"{GRAPH_BASE_URL}/users/{sender_email}/sendMail"
+            response = requests.post(url, headers=headers, json=message, timeout=30)
+
+            success = response.status_code in (200, 202)
+            response_text = response.text or response.reason
+
+            # Log in DB
             log_entry = EmailLog(
                 to=str(to).strip(),
                 subject=subject,
                 body_html=body_html,
                 body_text=body_text,
                 mailgun_response=response_text,
-                status_code=status_code,
+                status_code=response.status_code,
                 success=success,
-                created_at=datetime.utcnow()
+                created_at=datetime.utcnow(),
             )
             db.session.add(log_entry)
             db.session.commit()
-            print(f"🪵 EmailLog saved → {to} | status={status_code} | success={success}")
-        except Exception as e:
-            db.session.rollback()
-            print(f"⚠️ Failed to save EmailLog: {e}")
+            print(f"🪵 EmailLog saved → {to} | status={response.status_code} | success={success}")
 
-
-def send_email(to, subject, body_html, body_text=None):
-    """
-    Send email via Mailgun synchronously and log results in EmailLog.
-    Works safely from threads or within requests.
-    """
-    from flask import current_app
-    try:
-        flask_app = current_app._get_current_object()
-    except Exception:
-        from app import create_app
-        flask_app = create_app()  # fallback if running outside of request
-
-    data = {
-        "from": "support@360dentalbillingsolutions.com",
-        "to": str(to).strip(),
-        "subject": subject,
-        "html": body_html,
-    }
-    if body_text:
-        data["text"] = body_text
-
-    # ✅ open a safe context for all operations (Mailgun + DB logging)
-    with flask_app.app_context():
-        try:
-            response = requests.post(
-                flask_app.config.get("MAILGUN_API_URL", MAILGUN_API_URL),
-                auth=("api", flask_app.config.get("MAILGUN_API_KEY", MAILGUN_API_KEY)),
-                data=data,
-                timeout=30,
-            )
-
-            log_email(
-                to=to,
-                subject=subject,
-                body_html=body_html,
-                body_text=body_text,
-                response_text=response.text,
-                status_code=response.status_code,
-                success=(response.status_code == 200),
-            )
-
-            if response.status_code == 200:
-                print(f"✅ Email successfully sent to {to}")
+            if success:
+                print(f"✅ Microsoft Graph: Email successfully sent to {to}")
                 return True
             else:
-                print(f"❌ Failed to send email: {response.status_code} - {response.text}")
+                print(f"❌ Microsoft Graph: Failed to send email → {response.status_code} {response.text}")
                 return False
 
         except Exception as e:
-            print(f"⚠️ Email sending failed: {e}")
-            log_email(
-                to=to,
+            db.session.rollback()
+            print(f"⚠️ Microsoft Graph email error: {e}")
+            # Log failure
+            log_entry = EmailLog(
+                to=str(to).strip(),
                 subject=subject,
                 body_html=body_html,
                 body_text=body_text,
-                response_text=str(e),
+                mailgun_response=str(e),
                 status_code=None,
                 success=False,
+                created_at=datetime.utcnow(),
             )
+            db.session.add(log_entry)
+            db.session.commit()
             return False
+
+
+
+
+# def log_email(to, subject, body_html=None, body_text=None,
+#               response_text=None, status_code=None, success=False):
+#     """
+#     Save a record in the EmailLog table safely — works even inside threads.
+#     """
+#     from flask import current_app
+#     try:
+#         # get actual Flask app instance (thread-safe)
+#         flask_app = current_app._get_current_object()
+#     except Exception:
+#         from app import create_app
+#         flask_app = create_app()  # fallback if running outside request context
+
+#     with flask_app.app_context():
+#         try:
+#             log_entry = EmailLog(
+#                 to=str(to).strip(),
+#                 subject=subject,
+#                 body_html=body_html,
+#                 body_text=body_text,
+#                 mailgun_response=response_text,
+#                 status_code=status_code,
+#                 success=success,
+#                 created_at=datetime.utcnow()
+#             )
+#             db.session.add(log_entry)
+#             db.session.commit()
+#             print(f"🪵 EmailLog saved → {to} | status={status_code} | success={success}")
+#         except Exception as e:
+#             db.session.rollback()
+#             print(f"⚠️ Failed to save EmailLog: {e}")
+
+
+# def send_email(to, subject, body_html, body_text=None):
+#     """
+#     Send email via Mailgun synchronously and log results in EmailLog.
+#     Works safely from threads or within requests.
+#     """
+#     from flask import current_app
+#     try:
+#         flask_app = current_app._get_current_object()
+#     except Exception:
+#         from app import create_app
+#         flask_app = create_app()  # fallback if running outside of request
+
+#     data = {
+#         "from": "support@360dentalbillingsolutions.com",
+#         "to": str(to).strip(),
+#         "subject": subject,
+#         "html": body_html,
+#     }
+#     if body_text:
+#         data["text"] = body_text
+
+#     # ✅ open a safe context for all operations (Mailgun + DB logging)
+#     with flask_app.app_context():
+#         try:
+#             response = requests.post(
+#                 flask_app.config.get("MAILGUN_API_URL", MAILGUN_API_URL),
+#                 auth=("api", flask_app.config.get("MAILGUN_API_KEY", MAILGUN_API_KEY)),
+#                 data=data,
+#                 timeout=30,
+#             )
+
+#             log_email(
+#                 to=to,
+#                 subject=subject,
+#                 body_html=body_html,
+#                 body_text=body_text,
+#                 response_text=response.text,
+#                 status_code=response.status_code,
+#                 success=(response.status_code == 200),
+#             )
+
+#             if response.status_code == 200:
+#                 print(f"✅ Email successfully sent to {to}")
+#                 return True
+#             else:
+#                 print(f"❌ Failed to send email: {response.status_code} - {response.text}")
+#                 return False
+
+#         except Exception as e:
+#             print(f"⚠️ Email sending failed: {e}")
+#             log_email(
+#                 to=to,
+#                 subject=subject,
+#                 body_html=body_html,
+#                 body_text=body_text,
+#                 response_text=str(e),
+#                 status_code=None,
+#                 success=False,
+#             )
+#             return False
+
+
+
 
 # ─── Helper: Get user info from external API ────────────────
 def get_user_info_by_id(user_id):
