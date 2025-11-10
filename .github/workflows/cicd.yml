@@ -59,6 +59,10 @@ jobs:
             -e MAILGUN_API_URL=${{ secrets.MAILGUN_API_URL }} \
             -e MAILGUN_API_KEY=${{ secrets.MAILGUN_API_KEY }} \
             -e MAILGUN_DOMAIN=${{ secrets.MAILGUN_DOMAIN }} \
+            -e MICROSOFT_CLIENT_ID=${{ secrets.MICROSOFT_CLIENT_ID }} \
+            -e MICROSOFT_CLIENT_SECRET=${{ secrets.MICROSOFT_CLIENT_SECRET }} \
+            -e MICROSOFT_TENANT_ID=${{ secrets.MICROSOFT_TENANT_ID }} \
+            -e MICROSOFT_SENDER_EMAIL=${{ secrets.MICROSOFT_SENDER_EMAIL }} \
             --name ticketbackend \
             ${{ secrets.DOCKER_USERNAME }}/ticketbackend:latest
 
