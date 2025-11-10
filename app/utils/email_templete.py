@@ -294,30 +294,42 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
     changes_text = "\n".join([f"{field}: {old}  {new}" for field, old, new in changes]) or "—"
     changes_html_parts = []
     # Start alternating background after the initial fixed rows (Ticket ID, Title, Updated By = 3 rows)
-    is_odd_row = True  # Start as True for the first dynamic row after 3 fixed rows (making it the 4th row, which is even indexed for background purposes)
+    changes_html_list = []
+    # Start alternating background after the initial fixed rows (Ticket ID, Title, Updated By = 3 rows)
+    is_odd_row = True  # This will make the first *dynamic* row have background:#f9f9fb;
 
-    for i, (field, old_value, new_value) in enumerate(changes):
-        # Determine the background style for the current row
+    for field, old_value, new_value in changes:
         row_bg_style = 'background:#f9f9fb;' if is_odd_row else ''
         is_odd_row = not is_odd_row  # Toggle for the next row
 
-        # Format the field name nicely (e.g., "assign_to" -> "Assign To")
         formatted_field = field.replace('_', ' ').title()
 
-        changes_html_parts.append(f"""
-        <tr style="{row_bg_style}">
-            <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
-            <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
-                <span style="color:#dc3545; text-decoration:line-through;">{old_value}</span> &rarr; <span style="color:#28a745;">{new_value}</span>
-            </td>
-        </tr>
-        """)
+        if field.lower() == 'comment':
+            # For a comment, just show the new value (the comment itself)
+            changes_html_list.append(f"""
+            <tr style="{row_bg_style}">
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
+                    {new_value}
+                </td>
+            </tr>
+            """)
+        else:
+            # For other fields, use the old -> new styling
+            changes_html_list.append(f"""
+            <tr style="{row_bg_style}">
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
+                    <span style="color:#dc3545; text-decoration:line-through;">{old_value}</span> &rarr; <span style="color:#28a745;">{new_value}</span>
+                </td>
+            </tr>
+            """)
 
-    # If there are no changes, render the "—" row
-    if not changes_html_parts:
+    # Join the parts to form the final changes_html string
+    if not changes_html_list:
         changes_html = "<tr><td colspan='2' style='padding:12px 15px; text-align:center; font-size:14px;'>—</td></tr>"
     else:
-        changes_html = "".join(changes_html_parts)
+        changes_html = "".join(changes_html_list)
 
     # Plain text fallback
     body_text = (
