@@ -340,9 +340,6 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
                         <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
                         <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{updater_name}</td>
                     </tr>
-                    <!-- Dynamic Changes Section -->
-                    {changes_html}
-                    <!-- End Dynamic Changes Section -->
                 </table>
 
                 <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review and respond.</p>
