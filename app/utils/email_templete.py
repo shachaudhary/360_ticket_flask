@@ -292,10 +292,32 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
 
     # ✅ Changes ko readable bana do
     changes_text = "\n".join([f"{field}: {old}  {new}" for field, old, new in changes]) or "—"
-    changes_html = "".join([
-        f"<tr><td><strong>{field}</strong></td><td>{old}  {new}</td></tr>"
-        for field, old, new in changes
-    ]) or "<tr><td colspan='2'>—</td></tr>"
+    changes_html_parts = []
+    # Start alternating background after the initial fixed rows (Ticket ID, Title, Updated By = 3 rows)
+    is_odd_row = True  # Start as True for the first dynamic row after 3 fixed rows (making it the 4th row, which is even indexed for background purposes)
+
+    for i, (field, old_value, new_value) in enumerate(changes):
+        # Determine the background style for the current row
+        row_bg_style = 'background:#f9f9fb;' if is_odd_row else ''
+        is_odd_row = not is_odd_row  # Toggle for the next row
+
+        # Format the field name nicely (e.g., "assign_to" -> "Assign To")
+        formatted_field = field.replace('_', ' ').title()
+
+        changes_html_parts.append(f"""
+        <tr style="{row_bg_style}">
+            <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
+            <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
+                <span style="color:#dc3545; text-decoration:line-through;">{old_value}</span> &rarr; <span style="color:#28a745;">{new_value}</span>
+            </td>
+        </tr>
+        """)
+
+    # If there are no changes, render the "—" row
+    if not changes_html_parts:
+        changes_html = "<tr><td colspan='2' style='padding:12px 15px; text-align:center; font-size:14px;'>—</td></tr>"
+    else:
+        changes_html = "".join(changes_html_parts)
 
     # Plain text fallback
     body_text = (
@@ -339,6 +361,10 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
                     <tr style="background:#f9f9fb;">
                         <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
                         <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{updater_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Status:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{changes_html}</td>
                     </tr>
                 </table>
 
