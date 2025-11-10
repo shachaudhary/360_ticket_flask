@@ -45,49 +45,54 @@ def send_tag_email(ticket, tagged_user, assigner_info, comment=None):
     body_html = f"""
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8" /></head>
-<body style="font-family: Arial, sans-serif; background:#f4f6f8; color:#333;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-    <tr>
-        <td align="center">
-        <table width="600" style="background:#ffffff; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
-            <tr>
-                <td style="background:#0d6efd; padding:20px; text-align:center; color:#fff; font-size:20px; font-weight:bold;">
-                    Dental360 Support
-                </td>
-            </tr>
-            <tr>
-                <td style="padding:25px;">
-                    <p>Hello <strong>{tagged_user['username']}</strong>,</p>
-                    <p>You have been tagged in the following ticket:</p>
-                    <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0; border-radius:6px;">
-                        <tr style="background:#f9f9f9;">
-                            <td width="30%"><strong>Ticket ID</strong></td>
-                            <td>{ticket.id}</td>
-                        </tr>
-                        <tr><td><strong>Title</strong></td><td>{ticket.title}</td></tr>
-                        <tr style="background:#f9f9f9;">
-                            <td><strong>Tagged By</strong></td>
-                            <td>{assigner_name}</td>
-                        </tr>
-                        <tr><td><strong>Comment</strong></td><td>{comment.comment if comment else "—"}</td></tr>
-                    </table>
-                    <p style="margin:20px 0;">You can log in to the 
-                    <a href="https://dental360grp.com" style="color:#0d6efd;">Dental360 portal</a> to review and respond.</p>
-                    <p>Best Regards,<br><strong>Dental360 Support Team</strong></p>
-                </td>
-            </tr>
-            <tr>
-                <td style="background:#f4f6f8; padding:15px; text-align:center; font-size:12px; color:#888;">
-                    © {datetime.now().year} Dental360. All rights reserved.<br>
-                    3435 W. Irving Park Rd, Chicago, IL<br>
-                    <a href="https://dental360grp.com/unsubscribe" style="color:#888;">Unsubscribe</a>
-                </td>
-            </tr>
-        </table>
-        </td>
-    </tr>
-    </table>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{tagged_user['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">You've been tagged in a ticket that requires your attention:</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Ticket ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Title:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.title}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Tagged By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{assigner_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Comment:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{comment.comment if comment else "—"}</td>
+                    </tr>
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review and respond.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -125,49 +130,54 @@ def send_assign_email(ticket, assignee_info, assigner_info):
     body_html = f"""
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8" /></head>
-<body style="font-family: Arial, sans-serif; background:#f4f6f8; color:#333;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-    <tr>
-        <td align="center">
-        <table width="600" style="background:#ffffff; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
-            <tr>
-                <td style="background:#198754; padding:20px; text-align:center; color:#fff; font-size:20px; font-weight:bold;">
-                    Dental360 Support
-                </td>
-            </tr>
-            <tr>
-                <td style="padding:25px;">
-                    <p>Hello <strong>{assignee_info['username']}</strong>,</p>
-                    <p>A new ticket has been assigned to you:</p>
-                    <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0; border-radius:6px;">
-                        <tr style="background:#f9f9f9;">
-                            <td width="30%"><strong>Ticket ID</strong></td>
-                            <td>{ticket.id}</td>
-                        </tr>
-                        <tr><td><strong>Title</strong></td><td>{ticket.title}</td></tr>
-                        <tr style="background:#f9f9f9;">
-                            <td><strong>Assigned By</strong></td>
-                            <td>{assigner_name}</td>
-                        </tr>
-                        <tr><td><strong>Priority</strong></td><td>{ticket.priority or "Not set"}</td></tr>
-                    </table>
-                    <p style="margin:20px 0;">You can log in to the 
-                    <a href="https://dental360grp.com" style="color:#198754;">Dental360 portal</a> to review and take action.</p>
-                    <p>Best Regards,<br><strong>Dental360 Support Team</strong></p>
-                </td>
-            </tr>
-            <tr>
-                <td style="background:#f4f6f8; padding:15px; text-align:center; font-size:12px; color:#888;">
-                    © {datetime.now().year} Dental360. All rights reserved.<br>
-                    3435 W. Irving Park Rd, Chicago, IL<br>
-                    <a href="https://dental360grp.com/unsubscribe" style="color:#888;">Unsubscribe</a>
-                </td>
-            </tr>
-        </table>
-        </td>
-    </tr>
-    </table>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360 - Ticket Assigned
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{assignee_info['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">A new ticket has been assigned to you:</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Ticket ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Title:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.title}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Assigned By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{assigner_name}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Priority:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.priority or "Not set"}</td>
+                    </tr>
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review and take action.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -203,53 +213,58 @@ def send_follow_email(ticket, user_info, action_by=None, action_type="updated"):
     body_html = f"""
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8" /></head>
-<body style="font-family: Arial, sans-serif; background:#f4f6f8; color:#333;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-    <tr>
-        <td align="center">
-        <table width="600" style="background:#ffffff; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
-            <tr>
-                <td style="background:#0d6efd; padding:20px; text-align:center; color:#fff; font-size:20px; font-weight:bold;">
-                    Dental360 Support - Ticket Update
-                </td>
-            </tr>
-            <tr>
-                <td style="padding:25px;">
-                    <p>Hello <strong>{user_info['username']}</strong>,</p>
-                    <p>Ticket <strong>#{ticket.id}</strong> (<em>{ticket.title}</em>) was {action_type} by {actor_name}.</p>
-                    <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0; border-radius:6px;">
-                        <tr style="background:#f9f9f9;">
-                            <td width="30%"><strong>Ticket ID</strong></td>
-                            <td>{ticket.id}</td>
-                        </tr>
-                        <tr><td><strong>Title</strong></td><td>{ticket.title}</td></tr>
-                        <tr style="background:#f9f9f9;">
-                            <td><strong>Status</strong></td>
-                            <td>{ticket.status}</td>
-                        </tr>
-                        <tr><td><strong>Priority</strong></td><td>{ticket.priority or "Not set"}</td></tr>
-                        <tr style="background:#f9f9f9;">
-                            <td><strong>Updated By</strong></td>
-                            <td>{actor_name}</td>
-                        </tr>
-                    </table>
-                    <p style="margin:20px 0;">You can log in to the 
-                    <a href="https://dental360grp.com" style="color:#0d6efd;">Dental360 portal</a> to view the update.</p>
-                    <p>Best Regards,<br><strong>Dental360 Support Team</strong></p>
-                </td>
-            </tr>
-            <tr>
-                <td style="background:#f4f6f8; padding:15px; text-align:center; font-size:12px; color:#888;">
-                    © {datetime.now().year} Dental360. All rights reserved.<br>
-                    3435 W. Irving Park Rd, Chicago, IL<br>
-                    <a href="https://dental360grp.com/unsubscribe" style="color:#888;">Unsubscribe</a>
-                </td>
-            </tr>
-        </table>
-        </td>
-    </tr>
-    </table>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360 - Ticket Update
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{user_info['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">Ticket <strong>#{ticket.id}</strong> (<em>{ticket.title}</em>) was {action_type} by {actor_name}.</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Ticket ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Title:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.title}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Status:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.status}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Priority:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.priority or "Not set"}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{actor_name}</td>
+                    </tr>
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to view the update.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -299,50 +314,53 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
     body_html = f"""
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8" /></head>
-<body style="font-family: Arial, sans-serif; background:#f4f6f8; color:#333;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;">
-    <tr>
-        <td align="center">
-        <table width="600" style="background:#ffffff; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
-            <tr>
-                <td style="background:#0d6efd; padding:20px; text-align:center; color:#fff; font-size:20px; font-weight:bold;">
-                    Dental360 Support
-                </td>
-            </tr>
-            <tr>
-                <td style="padding:25px;">
-                    <p>Hello <strong>{user_info['username']}</strong>,</p>
-                    <p>A ticket you follow has been updated:</p>
-                    <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e0e0e0; border-radius:6px;">
-                        <tr style="background:#f9f9f9;">
-                            <td width="30%"><strong>Ticket ID</strong></td>
-                            <td>{ticket.id}</td>
-                        </tr>
-                        <tr><td><strong>Title</strong></td><td>{ticket.title}</td></tr>
-                        <tr style="background:#f9f9f9;">
-                            <td><strong>Updated By</strong></td>
-                            <td>{updater_name}</td>
-                        </tr>
-                        {changes_html}
-                    </table>
-                    <p style="margin:20px 0;">You can log in to the 
-                    <a href="https://dental360grp.com" style="color:#0d6efd;">Dental360 portal</a> 
-                    to review and respond.</p>
-                    <p>Best Regards,<br><strong>Dental360 Support Team</strong></p>
-                </td>
-            </tr>
-            <tr>
-                <td style="background:#f4f6f8; padding:15px; text-align:center; font-size:12px; color:#888;">
-                    © {datetime.now().year} Dental360. All rights reserved.<br>
-                    3435 W. Irving Park Rd, Chicago, IL<br>
-                    <a href="https://dental360grp.com/unsubscribe" style="color:#888;">Unsubscribe</a>
-                </td>
-            </tr>
-        </table>
-        </td>
-    </tr>
-    </table>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360 - Ticket Followed Update
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{user_info['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">A ticket you follow (<strong>#{ticket.id}</strong> - <em>{ticket.title}</em>) has been updated by {updater_name}.</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Ticket ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Title:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{ticket.title}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{updater_name}</td>
+                    </tr>
+                    <!-- Dynamic Changes Section -->
+                    {changes_html}
+                    <!-- End Dynamic Changes Section -->
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review and respond.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
