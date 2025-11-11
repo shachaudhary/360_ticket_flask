@@ -228,15 +228,13 @@ def analyze_message_category(app, form_id, message_text):
     """Background LLM analysis run inside Flask app context and auto-create ticket + link to contact form."""
     with app.app_context():
         try:
-            print(f"🧠 Starting category analysis for form_id={form_id}")
-
-            # 1️⃣ Fetch active categories
+            print(f":brain: Starting category analysis for form_id={form_id}")
+            # :one: Fetch active categories
             categories = [c.name for c in Category.query.filter_by(is_active=True).all()]
             if not categories:
-                print("⚠️ No categories found in DB.")
+                print(":warning: No categories found in DB.")
                 return
-
-            # 2️⃣ Build prompt
+            # :two: Build prompt
             system_prompt = (
                 "You are an AI assistant that classifies dental contact form messages "
                 "into one of the available categories. Respond only with the category name."
@@ -246,8 +244,7 @@ def analyze_message_category(app, form_id, message_text):
             Message: "{message_text}"
             Which category best fits this message?
             """
-
-            # 3️⃣ Call LLM
+            # :three: Call LLM
             response = llm_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -256,10 +253,8 @@ def analyze_message_category(app, form_id, message_text):
                 ],
                 temperature=0.2,
             )
-
             raw_content = response.choices[0].message.content.strip()
-
-            # 4️⃣ Extract final category name
+            # :four: Extract final category name
             match = re.search(
                 r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
                 raw_content,
@@ -267,24 +262,19 @@ def analyze_message_category(app, form_id, message_text):
             )
             final_message = match.group(1).strip() if match else raw_content.strip()
             category_result = final_message.split("\n")[0].strip()
-
-            print(f"✅ LLM predicted category: {category_result}")
-
-            # 5️⃣ Save category result to ContactFormSubmission
+            print(f":white_check_mark: LLM predicted category: {category_result}")
+            # :five: Save category result to ContactFormSubmission
             form = ContactFormSubmission.query.get(form_id)
             if not form:
-                print(f"⚠️ Form ID {form_id} not found.")
+                print(f":warning: Form ID {form_id} not found.")
                 return
-
             form.data = json.dumps({"predicted_category": category_result})
             db.session.commit()
-
-            # 6️⃣ Find category
+            # :six: Find category
             matched_category = Category.query.filter(
                 Category.name.ilike(category_result)
             ).first()
-
-            # 7️⃣ Create new Ticket
+            # :seven: Create new Ticket
             ticket = Ticket(
                 clinic_id=form.clinic_id,
                 title=f"Contact Form: {form.name or 'Unknown'}",
@@ -298,22 +288,18 @@ def analyze_message_category(app, form_id, message_text):
             )
             db.session.add(ticket)
             db.session.commit()
-
-            print(f"🎫 Auto Ticket Created → ID={ticket.id} | Category={category_result}")
-
-            # 8️⃣ Store link between ContactForm and Ticket
+            print(f":ticket: Auto Ticket Created → ID={ticket.id} | Category={category_result}")
+            # :eight: Store link between ContactForm and Ticket
             link = ContactFormTicketLink(
                 contact_form_id=form.id,
                 ticket_id=ticket.id
             )
             db.session.add(link)
             db.session.commit()
-            print(f"🔗 Linked ContactForm ID={form.id} with Ticket ID={ticket.id}")
-
-            # 9️⃣ Optional: auto-assign if category has assignee
+            print(f":link: Linked ContactForm ID={form.id} with Ticket ID={ticket.id}")
+            # :nine: Optional: auto-assign if category has assignee
             if matched_category and matched_category.assignee_id:
                 from app.ticket_routes import TicketAssignment, get_user_info_by_id, send_assign_email, create_notification
-
                 assignee_info = get_user_info_by_id(matched_category.assignee_id)
                 if assignee_info:
                     assignment = TicketAssignment(
@@ -323,7 +309,6 @@ def analyze_message_category(app, form_id, message_text):
                     )
                     db.session.add(assignment)
                     db.session.commit()
-
                     send_assign_email(ticket, assignee_info, {"username": "System"})
                     create_notification(
                         ticket_id=ticket.id,
@@ -332,9 +317,9 @@ def analyze_message_category(app, form_id, message_text):
                         notification_type="assign",
                         message=f"Auto-assigned to you for category {category_result}"
                     )
-
         except Exception as e:
-            print(f"❌ Error in analyze_message_category: {e}")
+            print(f":x: Error in analyze_message_category: {e}")
+
 
 import threading, requests
 from flask import current_app
