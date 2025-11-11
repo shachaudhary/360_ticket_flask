@@ -39,31 +39,24 @@ def create_notification(ticket_id, receiver_id, sender_id, notification_type, me
 @validate_token
 def get_notifications():
     receiver_id = request.args.get("user_id", type=int)
-    ticket_id = request.args.get("ticket_id", type=int)  # ✅ NEW
+    ticket_id = request.args.get("ticket_id", type=int)  # ✅ Added
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 10, type=int)
-
-    if not receiver_id:
-        return jsonify({"error": "user_id is required"}), 400
-
-    receiver_info = get_user_info_by_id(receiver_id)
-    if not receiver_info:
-        return jsonify({"error": "Invalid user"}), 404
 
     combined = []
 
     # ────────────── Ticket Notifications ──────────────
-    ticket_query = TicketNotification.query.filter_by(receiver_id=receiver_id)
-
-    if ticket_id:  # ✅ If ticket_id provided, filter by ticket_id
-        ticket_query = ticket_query.filter_by(ticket_id=ticket_id)
-
-    tickets = ticket_query.all()
+    if ticket_id:
+        tickets = TicketNotification.query.filter_by(ticket_id=ticket_id).all()
+    else:
+        if not receiver_id:
+            return jsonify({"error": "user_id is required"}), 400
+        tickets = TicketNotification.query.filter_by(receiver_id=receiver_id).all()
 
     for n in tickets:
         ticket = Ticket.query.get(n.ticket_id)
         sender_info = get_user_info_by_id(n.sender_id) if n.sender_id else None
-
+        receiver_info = get_user_info_by_id(n.receiver_id) if n.receiver_id else None
         combined.append({
             "id": n.id,
             "source": "ticket",
@@ -76,34 +69,45 @@ def get_notifications():
             "receiver_info": receiver_info
         })
 
-    # ────────────── Form Notifications As it is ──────────────
-    forms = FormEmailLog.query.filter_by(receiver_id=receiver_id).all()
-    for f in forms:
-        sender_info = get_user_info_by_id(f.sender_id) if f.sender_id else None
-        form_type_name = None
+    # ────────────── Form Email Logs (receiver_id required) ──────────────
+    if not ticket_id:
+        if not receiver_id:
+            return jsonify({"error": "user_id is required"}), 400
 
-        try:
-            resp = requests.get(f"{AUTH_API_BASE}/{f.form_type_id}", timeout=8)
-            if resp.status_code == 200:
-                api_data = resp.json()
-                form_type_name = api_data.get("name")
-        except:
-            pass
+        forms = FormEmailLog.query.filter_by(receiver_id=receiver_id).all()
+        for f in forms:
+            sender_info = get_user_info_by_id(f.sender_id) if f.sender_id else None
+            form_type_data = None
 
-        combined.append({
-            "id": f.id,
-            "source": "form",
-            "form_entry_id": f.form_entry_id,
-            "form_type_name": form_type_name,
-            "email_type": f.email_type,
-            "message": f.message,
-            "status": f.status,
-            "created_at": f.created_at,
-            "sender_info": sender_info,
-            "receiver_info": receiver_info
-        })
+            try:
+                resp = requests.get(f"{AUTH_API_BASE}/{f.form_type_id}", timeout=8)
+                if resp.status_code == 200:
+                    api_data = resp.json()
+                    form_type_name = api_data.get("name")
+                    form_type_data = {
+                        "id": api_data.get("id"),
+                        "name": api_data.get("name"),
+                        "display_name": api_data.get("display_name"),
+                        "description": api_data.get("description"),
+                        "assigned_users": api_data.get("users", [])
+                    }
+            except Exception as e:
+                print(f"⚠️ Error fetching form_type from AUTH API: {e}")
 
-    # ────────────── Sort + Paginate ──────────────
+            combined.append({
+                "id": f.id,
+                "source": "form",
+                "form_entry_id": f.form_entry_id,
+                "form_type_name": form_type_name,
+                "email_type": f.email_type,
+                "message": f.message,
+                "status": f.status,
+                "created_at": f.created_at,
+                "sender_info": sender_info,
+                "receiver_info": get_user_info_by_id(f.receiver_id)
+            })
+
+    # ────────────── Sort & Paginate ──────────────
     combined.sort(key=lambda x: x["created_at"], reverse=True)
     total = len(combined)
     start = (page - 1) * per_page
