@@ -7,7 +7,8 @@ from aiohttp import BasicAuth
 import asyncio, sys, threading
 from sqlalchemy import or_, and_
 
-from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, TicketStatusLog, TicketAssignmentLog
+from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, \
+    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink
 from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
@@ -668,9 +669,7 @@ def get_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
         return jsonify({"error": "Ticket not found"}), 404
-
     created_by = get_user_info_by_id(ticket.user_id) if ticket.user_id else None
-
     # --- Assignments (Current state)
     assignments = TicketAssignment.query.filter_by(ticket_id=ticket.id).all()
     assignees = []
@@ -684,14 +683,12 @@ def get_ticket(ticket_id):
             "assign_to_username": assign_to_info["username"] if assign_to_info else None,
             "assigned_at": a.assigned_at
         })
-
     # --- Assignment Logs (History)
     assignment_logs = []
     for log in TicketAssignmentLog.query.filter_by(ticket_id=ticket.id).order_by(TicketAssignmentLog.changed_at.desc()).all():
         old_user_info = get_user_info_by_id(log.old_assign_to) if log.old_assign_to else None
         new_user_info = get_user_info_by_id(log.new_assign_to) if log.new_assign_to else None
         changed_by_info = get_user_info_by_id(log.changed_by) if log.changed_by else None
-
         assignment_logs.append({
             "old_assign_to": log.old_assign_to,
             "old_assign_to_username": old_user_info["username"] if old_user_info else None,
@@ -701,14 +698,11 @@ def get_ticket(ticket_id):
             "changed_by_username": changed_by_info["username"] if changed_by_info else None,
             "changed_at": log.changed_at
         })
-
     # --- Files
     files = [{"name": f.file_name, "url": f.file_url}
              for f in TicketFile.query.filter_by(ticket_id=ticket.id).all()]
-    
     # --- Tags
     tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=ticket.id).all()]
-
     # --- Comments
     comments = []
     for c in TicketComment.query.filter_by(ticket_id=ticket.id).order_by(TicketComment.created_at.desc()).all():
@@ -719,7 +713,6 @@ def get_ticket(ticket_id):
             "comment": c.comment,
             "created_at": c.created_at
         })
-
     # --- Followups
     followups = []
     for f in TicketFollowUp.query.filter_by(ticket_id=ticket.id).all():
@@ -732,7 +725,6 @@ def get_ticket(ticket_id):
             "followup_date": f.followup_date,
             "created_at": f.created_at
         })
-
     # --- Category
     category = None
     if getattr(ticket, "category_id", None):
@@ -743,7 +735,6 @@ def get_ticket(ticket_id):
                 "name": cat.name,
                 "is_active": cat.is_active
             }
-
     # --- Status Logs
     status_logs = []
     for log in TicketStatusLog.query.filter_by(ticket_id=ticket.id).order_by(TicketStatusLog.changed_at.desc()).all():
@@ -755,7 +746,22 @@ def get_ticket(ticket_id):
             "changed_by_username": u_info["username"] if u_info else None,
             "changed_at": log.changed_at
         })
-
+    # --- Contact Form Patient Information
+    contact_form_info = None
+    contact_form_link = ContactFormTicketLink.query.filter_by(ticket_id=ticket.id).first()
+    if contact_form_link and contact_form_link.contact_form:
+        contact_form = contact_form_link.contact_form
+        contact_form_info = {
+            "id": contact_form.id,
+            "form_name": contact_form.form_name,
+            "name": contact_form.name,
+            "phone": contact_form.phone,
+            "email": contact_form.email,
+            "message": contact_form.message,
+            "data": contact_form.data,
+            "status": contact_form.status,
+            "created_at": contact_form.created_at
+        }
     # --- Final Response
     result = {
         "id": ticket.id,
@@ -768,16 +774,17 @@ def get_ticket(ticket_id):
         "completed_at": ticket.completed_at,
         "created_by": created_by,
         "assignees": assignees,
-        "assignment_logs": assignment_logs,   # ✅ NEW
+        "assignment_logs": assignment_logs,   # :white_check_mark: NEW
         "files": files,
         "tags": tags,
         "comments": comments,
         "followups": followups,
         "category": category,
-        "status_logs": status_logs
+        "status_logs": status_logs,
+        "contact_form_info": contact_form_info  # :white_check_mark: Patient contact information from contact form
     }
-
     return jsonify(result)
+
 
 # ─────────────────────────────────────────────
 # Add Ticket Activity Comment, Tags 
