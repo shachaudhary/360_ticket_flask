@@ -204,6 +204,7 @@ class ContactFormSubmission(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     clinic_id = db.Column(db.Integer, nullable=False)
+    location_id = db.Column(db.Integer, nullable=True)
     form_name = db.Column(db.String(255), nullable=False)
     name = db.Column(db.String(255), nullable=True)
     phone = db.Column(db.String(255), nullable=True)

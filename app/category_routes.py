@@ -224,7 +224,7 @@ def delete_category(category_id):
 #         }), 500
 import re, json
 # --- helper to analyze message category ---
-def analyze_message_category(app, form_id, message_text):
+def analyze_message_category(app, form_id, message_text, location_id=None, postal_code=None):
     """Background LLM analysis run inside Flask app context and auto-create ticket + link to contact form."""
     with app.app_context():
         try:
@@ -274,6 +274,37 @@ def analyze_message_category(app, form_id, message_text):
             matched_category = Category.query.filter(
                 Category.name.ilike(category_result)
             ).first()
+            
+            # :location: Determine location_id
+            # Use form's location_id if already set, otherwise use passed location_id
+            final_location_id = form.location_id or location_id
+            if not final_location_id and postal_code:
+                # Analyze by postal code
+                try:
+                    url = f"{AUTH_SYSTEM_URL}/clinic_locations/get_all/{form.clinic_id}"
+                    resp = requests.get(url, timeout=10)
+                    if resp.status_code == 200:
+                        locations_data = resp.json()
+                        locations = locations_data.get("locations", [])
+                        # Match by postal code
+                        for loc in locations:
+                            if loc.get("postal_code") == postal_code:
+                                final_location_id = loc.get("id")
+                                print(f":location: Matched location_id={final_location_id} by postal_code={postal_code}")
+                                break
+                        if not final_location_id:
+                            print(f":warning: No location found matching postal_code={postal_code}")
+                    else:
+                        print(f":warning: Failed to fetch locations: {resp.status_code}")
+                except Exception as e:
+                    print(f":warning: Error analyzing location by postal code: {e}")
+            
+            # Update location_id in ContactFormSubmission if determined from postal code
+            if final_location_id and final_location_id != form.location_id:
+                form.location_id = final_location_id
+                db.session.commit()
+                print(f":location: Updated ContactFormSubmission ID={form.id} with location_id={final_location_id}")
+            
             # :seven: Create new Ticket
             ticket = Ticket(
                 clinic_id=form.clinic_id,
@@ -284,7 +315,7 @@ def analyze_message_category(app, form_id, message_text):
                 priority="Medium",
                 due_date=None,
                 user_id=None,
-                location_id=None,
+                location_id=final_location_id,
             )
             db.session.add(ticket)
             db.session.commit()
@@ -342,9 +373,27 @@ def submit_contact_form():
         last_name = (data.get("last_name") or "").strip()
         full_name = f"{first_name} {last_name}".strip() if first_name or last_name else data.get("name")
 
+        # ✅ Extract location_id and postal_code
+        location_id = data.get("location_id")
+        postal_code = None
+        
+        # Extract postal_code from data field if location_id not provided
+        if not location_id:
+            data_field = data.get("data")
+            if data_field:
+                if isinstance(data_field, str):
+                    try:
+                        data_dict = json.loads(data_field)
+                        postal_code = data_dict.get("postal_code") if isinstance(data_dict, dict) else None
+                    except Exception:
+                        pass
+                elif isinstance(data_field, dict):
+                    postal_code = data_field.get("postal_code")
+
         # ✅ Save record locally
         form_entry = ContactFormSubmission(
             clinic_id=data.get("clinic_id"),
+            location_id=location_id,
             form_name="Contact Us",
             name=full_name,
             phone=data.get("phone"),
@@ -373,7 +422,7 @@ def submit_contact_form():
         # -----------------------------
         threading.Thread(
             target=analyze_message_category,
-            args=(app, form_entry.id, data.get("message")),
+            args=(app, form_entry.id, data.get("message"), location_id, postal_code),
             daemon=True
         ).start()
 
@@ -472,7 +521,7 @@ def get_all_contact_forms():
             page=page, per_page=per_page, error_out=False
         )
 
-        # 🔹 Serialize results with name split
+        # 🔹 Serialize results with name split and category extraction
         forms_data = []
         for form in pagination.items:
             # Split name safely
@@ -482,6 +531,17 @@ def get_all_contact_forms():
                 first_name = name_parts[0]
                 if len(name_parts) > 1:
                     last_name = name_parts[1]
+
+            # Extract predicted_category from data field
+            predicted_category = None
+            data_field = form.data
+            try:
+                if isinstance(data_field, str):
+                    data_field = json.loads(data_field)
+                if isinstance(data_field, dict) and "predicted_category" in data_field:
+                    predicted_category = data_field.get("predicted_category")
+            except Exception:
+                pass
 
             forms_data.append({
                 "id": form.id,
@@ -493,7 +553,8 @@ def get_all_contact_forms():
                 "phone": form.phone,
                 "email": form.email,
                 "message": form.message,
-                "data": form.data,
+                "data": data_field,
+                "predicted_category": predicted_category,
                 "status": form.status,
                 "created_at": form.created_at.strftime("%Y-%m-%d %H:%M:%S")
             })
@@ -632,11 +693,15 @@ def get_contact_form_by_id(id):
             if len(parts) > 1:
                 last_name = parts[1]
 
-        # parse 'data' if it’s JSON text
+        # parse 'data' if it's JSON text
         data_field = form.data
+        predicted_category = None
         try:
             if isinstance(data_field, str):
                 data_field = json.loads(data_field)
+            # Extract predicted_category if it exists
+            if isinstance(data_field, dict) and "predicted_category" in data_field:
+                predicted_category = data_field.get("predicted_category")
         except Exception:
             pass
 
@@ -661,6 +726,7 @@ def get_contact_form_by_id(id):
             "email": form.email,
             "message": form.message,
             "data": data_field,
+            "predicted_category": predicted_category,
             "status": form.status,
             "assigned_to": getattr(form, "assigned_to", None),
             "created_at": form.created_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -677,68 +743,3 @@ def get_contact_form_by_id(id):
     except Exception as e:
         print(f"❌ Error fetching contact form ID={id}:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
-
-#================update category===========================
-
-@category_bp.route("/contact/update_category/<int:id>", methods=["PUT"])
-def update_contact_category(id):
-    """
-    Update the category in the data field of a contact form.
-    Request body:
-    {
-        "category": "IT"  // or "Appointment", "Billing", etc.
-    }
-    Example: PUT /api/contact/update_category/123
-    {
-        "category": "IT"
-    }
-    """
-    try:
-        # Get the contact form
-        form = ContactFormSubmission.query.get(id)
-        if not form:
-            return jsonify({
-                "status": "error",
-                "message": f"Contact form with ID {id} not found."
-            }), 404
-        # Get category from request
-        data = request.get_json()
-        if not data or "category" not in data:
-            return jsonify({
-                "status": "error",
-                "message": "Category field is required in request body."
-            }), 400
-        new_category = data["category"]
-        # Parse existing data field
-        data_field = form.data
-        try:
-            if isinstance(data_field, str):
-                data_field = json.loads(data_field)
-            elif data_field is None:
-                data_field = {}
-        except Exception:
-            data_field = {}
-        # Ensure data_field is a dict
-        if not isinstance(data_field, dict):
-            data_field = {}
-        # Update the predicted_category
-        old_category = data_field.get("predicted_category")
-        data_field["predicted_category"] = new_category
-        # Save back to database
-        form.data = json.dumps(data_field)
-        db.session.commit()
-        return jsonify({
-            "status": "success",
-            "message": f"Category updated successfully from '{old_category}' to '{new_category}'",
-            "id": form.id,
-            "old_category": old_category,
-            "new_category": new_category,
-            "data": data_field
-        }), 200
-    except Exception as e:
-        db.session.rollback()
-        print(f":x: Error updating category for form ID={id}:", e)
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
