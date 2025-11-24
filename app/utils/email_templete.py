@@ -404,6 +404,132 @@ def send_update_ticket_email(ticket, user_info, updater_info, changes):
         args=(user_info["email"], subject, body_html, body_text)
     ).start()
 
+
+def send_category_update_email(category, assignee_info, updater_info, changes):
+    """
+    Send email notification when a category is updated.
+    Changes = list of tuples like: [("name", "Old Name", "New Name"), ("assignee_id", "1", "2"), ("is_active", "True", "False")]
+    """
+    if not assignee_info or not assignee_info.get("email"):
+        print("⚠️ Assignee has no email, skipping category update notification")
+        return
+
+    updater_name = updater_info.get("username") if updater_info else "System"
+    subject = f"Dental360 Category Updated: {category.name}"
+
+    # ✅ Format changes for display
+    changes_text = "\n".join([f"{field}: {old} → {new}" for field, old, new in changes]) or "—"
+    changes_html_list = []
+    is_odd_row = True
+
+    for field, old_value, new_value in changes:
+        row_bg_style = 'background:#f9f9fb;' if is_odd_row else ''
+        is_odd_row = not is_odd_row
+
+        formatted_field = field.replace('_', ' ').title()
+        
+        # Handle assignee_id specially - show usernames instead of IDs
+        if field == "assignee_id":
+            old_user = get_user_info_by_id(int(old_value)) if old_value and old_value != "None" else None
+            new_user = get_user_info_by_id(int(new_value)) if new_value and new_value != "None" else None
+            old_display = old_user.get("username") if old_user else "Unassigned"
+            new_display = new_user.get("username") if new_user else "Unassigned"
+            changes_html_list.append(f"""
+            <tr style="{row_bg_style}">
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
+                    <span style="color:#dc3545; text-decoration:line-through;">{old_display}</span> &rarr; <span style="color:#28a745;">{new_display}</span>
+                </td>
+            </tr>
+            """)
+        else:
+            changes_html_list.append(f"""
+            <tr style="{row_bg_style}">
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>{formatted_field}:</strong></td>
+                <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">
+                    <span style="color:#dc3545; text-decoration:line-through;">{old_value}</span> &rarr; <span style="color:#28a745;">{new_value}</span>
+                </td>
+            </tr>
+            """)
+
+    if not changes_html_list:
+        changes_html = "<tr><td colspan='2' style='padding:12px 15px; text-align:center; font-size:14px;'>—</td></tr>"
+    else:
+        changes_html = "".join(changes_html_list)
+
+    # Plain text fallback
+    body_text = (
+        f"Dental360 Support\n\n"
+        f"Hello {assignee_info['username']},\n\n"
+        f"A category assigned to you has been updated:\n\n"
+        f"Category ID: {category.id}\n"
+        f"Category Name: {category.name}\n"
+        f"Updated By: {updater_name}\n"
+        f"{changes_text}\n\n"
+        f"You can log in to the Dental360 portal to review the category.\n\n"
+        f"Best Regards,\nDental360 Support Team"
+    )
+
+    # HTML template
+    body_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360 - Category Updated
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{assignee_info['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">A category assigned to you (<strong>#{category.id}</strong> - <em>{category.name}</em>) has been updated by {updater_name}.</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Category ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{category.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Category Name:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{category.name}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{updater_name}</td>
+                    </tr>
+                    {changes_html}
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review the category.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+    # ✅ Async send
+    print(f"📧 Sending category update email → {assignee_info['email']} | Category #{category.id}")
+    threading.Thread(
+        target=send_email,
+        args=(assignee_info["email"], subject, body_html, body_text)
+    ).start()
+
 import threading
 
 

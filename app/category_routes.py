@@ -1,7 +1,8 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from app import db
 from app.model import Category, ContactFormSubmission, Ticket, ContactFormTicketLink, TicketAssignment, TicketAssignmentLog,TicketFile,TicketComment,TicketStatusLog,TicketTag, TicketFollowUp
 from app.utils.helper_function import get_user_info_by_id
+from app.utils.email_templete import send_email
 from app.dashboard_routes import require_api_key, validate_token
 from datetime import datetime, timedelta
 from app import llm_client
@@ -791,6 +792,101 @@ def update_contact_category(id):
         # Save back to database
         form.data = json.dumps(data_field)
         db.session.commit()
+
+        # Get updater info from g.user (set by validate_token) or use System
+        updater_info = getattr(g, "user", None)
+        updater_name = updater_info.get("username") if updater_info and isinstance(updater_info, dict) else "System"
+
+        # Find the Category by name and get its assignee
+        matched_category = Category.query.filter(
+            Category.name.ilike(new_category)
+        ).first()
+
+        # Send email to assigned user if category exists and has an assignee
+        if matched_category and matched_category.assignee_id:
+            assignee_info = get_user_info_by_id(matched_category.assignee_id)
+            if assignee_info and assignee_info.get("email"):
+                subject = f"Dental360 Contact Form Category Updated"
+                
+                # Plain text fallback
+                body_text = (
+                    f"Hello {assignee_info['username']},\n\n"
+                    f"A contact form's category has been updated and assigned to your category.\n\n"
+                    f"Contact Form ID: {form.id}\n"
+                    f"Contact Name: {form.name or 'Unknown'}\n"
+                    f"Old Category: {old_category or 'None'}\n"
+                    f"New Category: {new_category}\n"
+                    f"Updated By: {updater_name}\n\n"
+                    f"Please log in to the Dental360 system to review the contact form.\n\n"
+                    f"Best Regards,\nDental360 Support Team"
+                )
+
+                # HTML template
+                body_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background:#f4f6f8; color:#333; margin:0; padding:0;">
+    <div style="width:100%; padding:20px; box-sizing:border-box;">
+        <div style="width:600px; max-width:100%; background:#ffffff; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.08); margin:0 auto; overflow:hidden;">
+            <div style="background:#202336; padding:20px; text-align:center; color:#fff; font-size:24px; font-weight:bold; display:flex; align-items:center; justify-content:center; gap:10px;">
+                SUPPORT 360 - Contact Form Category Updated
+            </div>
+            <div style="padding:30px;">
+                <p style="line-height:1.6; margin-bottom:15px;">Hello <strong>{assignee_info['username']}</strong>,</p>
+                <p style="line-height:1.6; margin-bottom:15px;">A contact form's category has been updated and assigned to your category (<strong>{new_category}</strong>).</p>
+
+                <table cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; margin-top:20px; margin-bottom:25px; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+                    <tr style="background:#f9f9fb;">
+                        <td width="30%" style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Contact Form ID:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{form.id}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Contact Name:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{form.name or 'Unknown'}</td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Old Category:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{old_category or 'None'}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>New Category:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><span style="color:#28a745; font-weight:bold;">{new_category}</span></td>
+                    </tr>
+                    <tr style="background:#f9f9fb;">
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;"><strong>Updated By:</strong></td>
+                        <td style="padding:12px 15px; text-align:left; border-bottom:1px solid #eee; font-size:14px;">{updater_name}</td>
+                    </tr>
+                </table>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:25px;">You can log in to the Support 360 Portal to review the contact form.</p>
+                <p style="text-align:center;">
+                    <a href="https://support.dental360grp.com" style="display:inline-block; background-color:#7A3EF5; color:#ffffff; padding:12px 25px; border-radius:6px; text-decoration:none; font-weight:bold; font-size:16px; margin-top:20px; transition:background-color 0.3s ease;">
+                        Support 360 Portal
+                    </a>
+                </p>
+
+                <p style="line-height:1.6; margin-bottom:15px; margin-top:30px;">Best Regards,<br><strong>The Support 360 Team</strong></p>
+            </div>
+            <div style="background:#202336; padding:20px; text-align:center; font-size:12px; color:#b0b0b0; line-height:1.8;">
+                © {datetime.now().year} Support 360 by Dental360. All rights reserved.<br>
+                3435 W. Irving Park Rd, Chicago, IL<br>
+                <a href="https://support.dental360grp.com/unsubscribe" style="color:#b0b0b0; text-decoration:underline;">Unsubscribe</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+                print(f"📧 Sending category update email → {assignee_info['email']} | Contact Form #{form.id}")
+                threading.Thread(
+                    target=send_email,
+                    args=(assignee_info["email"], subject, body_html, body_text)
+                ).start()
+
         return jsonify({
             "status": "success",
             "message": f"Category updated successfully from '{old_category}' to '{new_category}'",
