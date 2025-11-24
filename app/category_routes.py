@@ -743,3 +743,66 @@ def get_contact_form_by_id(id):
     except Exception as e:
         print(f"❌ Error fetching contact form ID={id}:", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@category_bp.route("/contact/update_category/<int:id>", methods=["PUT"])
+def update_contact_category(id):
+    """
+    Update the category in the data field of a contact form.
+    Request body:
+    {
+        "category": "IT"  // or "Appointment", "Billing", etc.
+    }
+    Example: PUT /api/contact/update_category/123
+    {
+        "category": "IT"
+    }
+    """
+    try:
+        # Get the contact form
+        form = ContactFormSubmission.query.get(id)
+        if not form:
+            return jsonify({
+                "status": "error",
+                "message": f"Contact form with ID {id} not found."
+            }), 404
+        # Get category from request
+        data = request.get_json()
+        if not data or "category" not in data:
+            return jsonify({
+                "status": "error",
+                "message": "Category field is required in request body."
+            }), 400
+        new_category = data["category"]
+        # Parse existing data field
+        data_field = form.data
+        try:
+            if isinstance(data_field, str):
+                data_field = json.loads(data_field)
+            elif data_field is None:
+                data_field = {}
+        except Exception:
+            data_field = {}
+        # Ensure data_field is a dict
+        if not isinstance(data_field, dict):
+            data_field = {}
+        # Update the predicted_category
+        old_category = data_field.get("predicted_category")
+        data_field["predicted_category"] = new_category
+        # Save back to database
+        form.data = json.dumps(data_field)
+        db.session.commit()
+        return jsonify({
+            "status": "success",
+            "message": f"Category updated successfully from '{old_category}' to '{new_category}'",
+            "id": form.id,
+            "old_category": old_category,
+            "new_category": new_category,
+            "data": data_field
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f":x: Error updating category for form ID={id}:", e)
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
