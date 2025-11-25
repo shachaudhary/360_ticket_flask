@@ -306,6 +306,11 @@ def analyze_message_category(app, form_id, message_text, location_id=None, posta
                 db.session.commit()
                 print(f":location: Updated ContactFormSubmission ID={form.id} with location_id={final_location_id}")
             
+            # Check if category is spam - skip ticket creation if it is
+            if category_result and category_result.lower().strip() == "spam":
+                print(f":no_entry: Category is 'spam' - skipping ticket creation for form ID={form.id}")
+                return
+            
             # :seven: Create new Ticket
             ticket = Ticket(
                 clinic_id=form.clinic_id,
