@@ -6,13 +6,16 @@ import aiohttp
 from aiohttp import BasicAuth
 import asyncio, sys, threading
 from sqlalchemy import or_, and_
+import re
+import html
 
 from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, \
-    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink
-from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log
+    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink, EmailProcessedLog
+from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log, get_user_id_by_email, get_graph_token, GRAPH_BASE_URL
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
 from app.dashboard_routes import require_api_key, validate_token
+from app import llm_client
 # ─── Windows Fix for asyncio ─────────────────────────────────────────────
 # if sys.platform.startswith("win"):
 #     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -1042,4 +1045,388 @@ def filter_tickets():
         "per_page": pagination.per_page,
         "pages": pagination.pages
     })
+
+
+def clean_email_content_with_llm(email_content: str) -> str:
+    """
+    Clean email content using LLM to remove signatures, reply chains, and extract main message.
+    """
+    if not email_content or len(email_content.strip()) < 10:
+        return email_content
+    
+    try:
+        system_prompt = (
+            "You are an email content cleaner. Your task is to extract the main message content "
+            "from an email, removing signatures, disclaimers, reply chains, and other noise. "
+            "Return only the clean, relevant message content. If the email is just a reply chain "
+            "with no new content, return 'No new content'."
+        )
+        
+        user_prompt = f"""
+        Clean this email content and extract only the main message:
+        
+        {email_content[:2000]}  # Limit to first 2000 chars to avoid token limits
+        
+        Return only the cleaned message content, nothing else.
+        """
+        
+        response = llm_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+        
+        cleaned_content = response.choices[0].message.content.strip()
+        
+        # Extract final message if wrapped in special format
+        match = re.search(
+            r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
+            cleaned_content,
+            re.DOTALL
+        )
+        if match:
+            cleaned_content = match.group(1).strip()
+        
+        # If LLM says no content, return original (fallback)
+        if cleaned_content.lower() in ["no new content", "no content", "none"]:
+            return email_content[:500]  # Return first 500 chars as fallback
+        
+        return cleaned_content
+        
+    except Exception as e:
+        print(f"⚠️ Error cleaning email content with LLM: {e}")
+        # Fallback to original content
+        return email_content[:1000] if len(email_content) > 1000 else email_content
+
+
+
+
+def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -> str:
+    """
+    Extract the main message content from an HTML email body.
+    Heuristics:
+      - Strip HTML tags
+      - Stop before common reply/forward separators and signatures
+    """
+    if not html_body:
+        return fallback_preview or ""
+
+    try:
+        # Remove HTML tags
+        text = re.sub(r"<[^>]+>", "", html_body)
+        # Decode HTML entities
+        text = html.unescape(text)
+
+        # Normalize newlines
+        lines = [line.strip() for line in text.splitlines()]
+
+        main_lines = []
+        for line in lines:
+            # Stop at common separators / quoted blocks
+            lower = line.lower()
+            if (
+                line.startswith("-----Original Message")
+                or "original message" in lower
+                or line.startswith("________________")  # Outlook separators
+                or lower.startswith("from: ")
+                or lower.startswith("sent: ")
+                or lower.startswith("subject: ")
+                or "get outlook for" in lower
+                or "get <https://aka.ms" in lower
+            ):
+                break
+
+            # Skip very noisy / empty lines at top
+            if not line:
+                # Preserve single blank line only if we already have some content
+                if main_lines and main_lines[-1] != "":
+                    main_lines.append("")
+                continue
+
+            main_lines.append(line)
+
+        cleaned = "\n".join(main_lines).strip()
+        if not cleaned:
+            return fallback_preview or text.strip()
+        return cleaned
+    except Exception:
+        # Fallback: return preview or raw text
+        return fallback_preview or html_body
+
+
+def _process_emails_internal():
+    """
+    Internal function to process emails - can be called from scheduler or route.
+    Process new emails from it.support@dental360grp.com and create tickets.
+    Only processes emails received in the last 10 minutes.
+    Uses conversationId to detect duplicates and add follow-ups as comments.
+    """
+    try:
+        import os
+        from flask import current_app
+        from datetime import timedelta
+        
+        # Get email address to monitor
+        email_address = os.getenv("MICROSOFT_EMAIL", "it.support@dental360grp.com")
+        
+        # Get access token
+        token = get_graph_token()
+        if not token:
+            return {"error": "Failed to get Microsoft Graph access token", "status": "error"}
+        
+        # Calculate time 10 minutes ago (in UTC)
+        ten_minutes_ago = datetime.utcnow() - timedelta(minutes=10)
+        # Format for Microsoft Graph API (ISO 8601 format)
+        time_filter = ten_minutes_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Build the API URL to get unread emails
+        base_url = f"{GRAPH_BASE_URL}/users/{email_address}/mailFolders/inbox/messages"
+        
+        # Query parameters - get unread emails from last 10 minutes only
+        params = {
+            '$top': 50,  # Process up to 50 emails at a time
+            '$filter': f'receivedDateTime ge {time_filter}',  # Only emails from last 10 minutes
+            '$orderby': 'receivedDateTime desc',  # Most recent first
+            '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,body,hasAttachments,conversationId'
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Make the API request
+        response = requests.get(base_url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code != 200:
+            return {
+                "error": "Failed to fetch emails",
+                "status": "error",
+                "status_code": response.status_code,
+                "details": response.text
+            }
+        
+        data = response.json()
+        emails = data.get('value', [])
+        
+        processed_count = 0
+        tickets_created = 0
+        comments_added = 0
+        skipped_count = 0
+        
+        # System email patterns to skip (prevent infinite loops from ticket notification emails)
+        system_email_patterns = [
+            "Dental360 New Ticket Assigned:",
+            "Dental360 Ticket",
+            "SUPPORT 360",
+            "Ticket Assigned",
+            "Ticket Updated",
+            "Ticket Followed Update",
+            "Category Updated",
+            "Contact Form Category Updated"
+        ]
+        
+        for email in emails:
+            try:
+                email_id = email.get("id")
+                conversation_id = email.get("conversationId")
+                subject = email.get("subject", "")
+                sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
+                sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+                
+                # Skip if already processed
+                existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+                if existing_log:
+                    skipped_count += 1
+                    continue
+                
+                # Skip system-generated notification emails (prevent infinite loops)
+                if subject and any(pattern in subject for pattern in system_email_patterns):
+                    print(f"⏭️ Skipping system notification email: {subject}")
+                    # Still log it as processed to avoid reprocessing
+                    email_log = EmailProcessedLog(
+                        email_id=email_id,
+                        conversation_id=conversation_id,
+                        ticket_id=None,
+                        sender_email=sender_email,
+                        user_id=None,
+                        email_subject=subject,
+                        is_followup=False
+                    )
+                    db.session.add(email_log)
+                    db.session.commit()
+                    skipped_count += 1
+                    continue
+                
+                # Get user_id from sender email
+                user_id = None
+                if sender_email:
+                    user_id = get_user_id_by_email(sender_email)
+                    if not user_id:
+                        print(f"⚠️ User not found for email: {sender_email}")
+                
+                # Extract email content
+                raw_body = email.get("body", {}).get("content") if email.get("body") else None
+                content_type = email.get("body", {}).get("contentType") if email.get("body") else None
+                body_preview = email.get("bodyPreview", "")
+                
+                # Extract main content (plain text) from HTML or use preview
+                if content_type and content_type.lower() == "html":
+                    initial_content = extract_main_content_from_html(raw_body or "", body_preview)
+                else:
+                    initial_content = (raw_body or body_preview or "").strip()
+                
+                # Clean email content using LLM
+                print(f"🧹 Cleaning email content with LLM...")
+                main_content = clean_email_content_with_llm(initial_content)
+                print(f"✅ Email content cleaned: {len(main_content)} characters")
+                
+                # Check if conversation already has a ticket (duplicate detection)
+                existing_conversation = None
+                if conversation_id:
+                    existing_conversation = EmailProcessedLog.query.filter_by(
+                        conversation_id=conversation_id
+                    ).first()
+                
+                if existing_conversation and existing_conversation.ticket_id:
+                    # Follow-up: Add as comment to existing ticket
+                    ticket = Ticket.query.get(existing_conversation.ticket_id)
+                    if ticket:
+                        comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                        
+                        comment = TicketComment(
+                            ticket_id=ticket.id,
+                            user_id=user_id,
+                            comment=comment_text
+                        )
+                        db.session.add(comment)
+                        
+                        # Log email as processed
+                        email_log = EmailProcessedLog(
+                            email_id=email_id,
+                            conversation_id=conversation_id,
+                            ticket_id=ticket.id,
+                            sender_email=sender_email,
+                            user_id=user_id,
+                            email_subject=subject,
+                            is_followup=True
+                        )
+                        db.session.add(email_log)
+                        db.session.commit()
+                        
+                        comments_added += 1
+                        processed_count += 1
+                        print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
+                    else:
+                        print(f"⚠️ Ticket {existing_conversation.ticket_id} not found for conversation {conversation_id}")
+                else:
+                    # New conversation: Create new ticket
+                    # Use IT category for all email tickets
+                    category_id = None
+                    matched_category = None
+                    
+                    # Find IT category
+                    it_category = Category.query.filter(
+                        Category.name.ilike("IT")
+                    ).first()
+                    if it_category:
+                        category_id = it_category.id
+                        matched_category = it_category
+                        print(f"✅ Using IT category for email ticket")
+                    
+                    # Create ticket
+                    ticket = Ticket(
+                        clinic_id=None,  # Can be set later if needed
+                        title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
+                        details=main_content or "(no content)",
+                        category_id=category_id,
+                        status="Pending",
+                        priority="low",
+                        due_date=None,
+                        user_id=user_id,  # Sender as creator
+                        location_id=None,
+                    )
+                    db.session.add(ticket)
+                    db.session.commit()
+                    
+                    # Auto-assign if category has assignee
+                    if matched_category and matched_category.assignee_id:
+                        assignment = TicketAssignment(
+                            ticket_id=ticket.id,
+                            assign_to=matched_category.assignee_id,
+                            assign_by=None  # System-generated
+                        )
+                        db.session.add(assignment)
+                        db.session.commit()
+                        
+                        assignee_info = get_user_info_by_id(matched_category.assignee_id)
+                        if assignee_info:
+                            send_assign_email(ticket, assignee_info, {"username": "System"})
+                            create_notification(
+                                ticket_id=ticket.id,
+                                receiver_id=matched_category.assignee_id,
+                                sender_id=None,
+                                notification_type="assign",
+                                message=f"Auto-assigned from email: {subject}"
+                            )
+                    
+                    # Log email as processed
+                    email_log = EmailProcessedLog(
+                        email_id=email_id,
+                        conversation_id=conversation_id,
+                        ticket_id=ticket.id,
+                        sender_email=sender_email,
+                        user_id=user_id,
+                        email_subject=subject,
+                        is_followup=False
+                    )
+                    db.session.add(email_log)
+                    db.session.commit()
+                    
+                    tickets_created += 1
+                    processed_count += 1
+                    print(f"✅ Created ticket #{ticket.id} from email {email_id}")
+                
+            except Exception as e:
+                print(f"❌ Error processing email {email.get('id', 'unknown')}: {e}")
+                db.session.rollback()
+                continue
+        
+        return {
+            "status": "success",
+            "message": f"Processed {processed_count} emails",
+            "tickets_created": tickets_created,
+            "comments_added": comments_added,
+            "skipped": skipped_count,
+            "total_emails_fetched": len(emails),
+            "time_range": f"Last 10 minutes (from {time_filter})"
+        }
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error processing emails: {e}")
+        return {"error": str(e), "status": "error"}
+
+
+@ticket_bp.route("/process_emails", methods=["POST"])
+# @require_api_key
+def process_emails():
+    """
+    API endpoint to manually trigger email processing.
+    Calls the internal processing function and returns JSON response.
+    """
+    result = _process_emails_internal()
+    
+    # If result is a dict (from internal function), convert to JSON response
+    if isinstance(result, dict):
+        if result.get("status") == "error":
+            return jsonify(result), 500
+        return jsonify(result), 200
+    
+    # If it's already a Flask response, return it
+    return result
 

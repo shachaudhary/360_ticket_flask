@@ -246,3 +246,24 @@ class EmailLog(db.Model):
     status_code = db.Column(db.Integer, nullable=True)
     success = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class EmailProcessedLog(db.Model):
+    """
+    Tracks processed emails to prevent duplicate ticket creation.
+    Uses conversationId to group email threads.
+    """
+    __tablename__ = "email_processed_logs"
+
+    id = db.Column(db.Integer, primary_key=True)
+    email_id = db.Column(db.String(500), unique=True, nullable=False)  # Microsoft Graph email ID
+    conversation_id = db.Column(db.String(500), nullable=True, index=True)  # For grouping email threads
+    ticket_id = db.Column(db.Integer, nullable=True)  # Which ticket this email belongs to
+    sender_email = db.Column(db.String(255), nullable=True)
+    user_id = db.Column(db.Integer, nullable=True)  # User ID from Auth System
+    email_subject = db.Column(db.String(500), nullable=True)
+    processed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_followup = db.Column(db.Boolean, default=False)  # True if added as comment to existing ticket
+
+    def __repr__(self):
+        return f"<EmailProcessedLog email_id={self.email_id} ticket_id={self.ticket_id} conversation_id={self.conversation_id}>"

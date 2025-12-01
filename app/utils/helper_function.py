@@ -293,6 +293,42 @@ def get_user_info_by_id(user_id):
     return None
 
 
+def get_user_id_by_email(email):
+    """
+    Get user_id from Auth System API by email address.
+    Returns user_id if found, None otherwise.
+    Response structure: {"message": "...", "results": [{"id": 149, "user_id": 71, ...}]}
+    """
+    try:
+        url = f"https://api.dental360grp.com/api/clinic_team/search"
+        params = {"query": email}
+        resp = requests.get(url, params=params, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("results", [])
+            
+            if results and len(results) > 0:
+                # Get first matching user
+                user = results[0]
+                # Return 'id' field (primary user ID) or 'user_id' as fallback
+                user_id =  user.get("user_id")
+                if user_id:
+                    print(f"✅ Found user_id {user_id} for email {email}")
+                    return user_id
+                else:
+                    print(f"⚠️ User found but no ID field for email {email}")
+                    return None
+            else:
+                print(f"⚠️ No results found for email {email}")
+                return None
+        else:
+            print(f"⚠️ User not found for email {email}: {resp.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ Error fetching user by email {email}: {e}")
+        return None
+
+
 def update_ticket_status(ticket_id, new_status, user_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
