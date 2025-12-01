@@ -1238,9 +1238,10 @@ def _process_emails_internal():
                 sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
                 sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
                 
-                # Skip if already processed
+                # Skip if already processed (check by email_id first - most important check)
                 existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
                 if existing_log:
+                    print(f"⏭️ Email {email_id} already processed, skipping...")
                     skipped_count += 1
                     continue
                 
@@ -1294,9 +1295,40 @@ def _process_emails_internal():
                 
                 if existing_conversation and existing_conversation.ticket_id:
                     # Follow-up: Add as comment to existing ticket
+                    # Double-check this email wasn't already processed (race condition protection)
+                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+                    if existing_email_check:
+                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
+                        skipped_count += 1
+                        continue
+                    
                     ticket = Ticket.query.get(existing_conversation.ticket_id)
                     if ticket:
                         comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                        
+                        # Check if this exact comment already exists (prevent duplicates)
+                        existing_comment = TicketComment.query.filter_by(
+                            ticket_id=ticket.id,
+                            user_id=user_id,
+                            comment=comment_text
+                        ).first()
+                        
+                        if existing_comment:
+                            print(f"⏭️ Comment already exists for email {email_id}, skipping...")
+                            # Still log email as processed
+                            email_log = EmailProcessedLog(
+                                email_id=email_id,
+                                conversation_id=conversation_id,
+                                ticket_id=ticket.id,
+                                sender_email=sender_email,
+                                user_id=user_id,
+                                email_subject=subject,
+                                is_followup=True
+                            )
+                            db.session.add(email_log)
+                            db.session.commit()
+                            skipped_count += 1
+                            continue
                         
                         comment = TicketComment(
                             ticket_id=ticket.id,
@@ -1305,7 +1337,7 @@ def _process_emails_internal():
                         )
                         db.session.add(comment)
                         
-                        # Log email as processed
+                        # Log email as processed BEFORE commit to prevent race conditions
                         email_log = EmailProcessedLog(
                             email_id=email_id,
                             conversation_id=conversation_id,
