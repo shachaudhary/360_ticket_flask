@@ -1287,12 +1287,16 @@ def _process_emails_internal():
                 print(f"✅ Email content cleaned: {len(main_content)} characters")
                 
                 # Check if conversation already has a ticket (duplicate detection)
+                # This should be checked BEFORE processing to prevent duplicate tickets
                 existing_conversation = None
                 if conversation_id:
                     existing_conversation = EmailProcessedLog.query.filter_by(
                         conversation_id=conversation_id
+                    ).filter(
+                        EmailProcessedLog.ticket_id.isnot(None)  # Only get entries with tickets
                     ).first()
                 
+                # If conversation exists and has a ticket, add as comment (follow-up)
                 if existing_conversation and existing_conversation.ticket_id:
                     # Follow-up: Add as comment to existing ticket
                     # Double-check this email wasn't already processed (race condition protection)
@@ -1357,6 +1361,75 @@ def _process_emails_internal():
                         print(f"⚠️ Ticket {existing_conversation.ticket_id} not found for conversation {conversation_id}")
                 else:
                     # New conversation: Create new ticket
+                    # Double-check this email wasn't already processed (race condition protection)
+                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+                    if existing_email_check:
+                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
+                        skipped_count += 1
+                        continue
+                    
+                    # Also check if conversation_id exists but wasn't caught above (safety check)
+                    if conversation_id:
+                        safety_check = EmailProcessedLog.query.filter_by(
+                            conversation_id=conversation_id
+                        ).filter(
+                            EmailProcessedLog.ticket_id.isnot(None)
+                        ).first()
+                        if safety_check:
+                            print(f"⚠️ Conversation {conversation_id} already has ticket #{safety_check.ticket_id}, adding as comment instead...")
+                            # Add as comment instead of creating new ticket
+                            ticket = Ticket.query.get(safety_check.ticket_id)
+                            if ticket:
+                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                                
+                                # Check if comment already exists
+                                existing_comment = TicketComment.query.filter_by(
+                                    ticket_id=ticket.id,
+                                    user_id=user_id,
+                                    comment=comment_text
+                                ).first()
+                                
+                                if not existing_comment:
+                                    comment = TicketComment(
+                                        ticket_id=ticket.id,
+                                        user_id=user_id,
+                                        comment=comment_text
+                                    )
+                                    db.session.add(comment)
+                                    
+                                    # Log email as processed
+                                    email_log = EmailProcessedLog(
+                                        email_id=email_id,
+                                        conversation_id=conversation_id,
+                                        ticket_id=ticket.id,
+                                        sender_email=sender_email,
+                                        user_id=user_id,
+                                        email_subject=subject,
+                                        is_followup=True
+                                    )
+                                    db.session.add(email_log)
+                                    db.session.commit()
+                                    
+                                    comments_added += 1
+                                    processed_count += 1
+                                    print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
+                                else:
+                                    print(f"⏭️ Comment already exists, skipping...")
+                                    # Still log email as processed
+                                    email_log = EmailProcessedLog(
+                                        email_id=email_id,
+                                        conversation_id=conversation_id,
+                                        ticket_id=ticket.id,
+                                        sender_email=sender_email,
+                                        user_id=user_id,
+                                        email_subject=subject,
+                                        is_followup=True
+                                    )
+                                    db.session.add(email_log)
+                                    db.session.commit()
+                                    skipped_count += 1
+                            continue
+                    
                     # Use IT category for all email tickets
                     category_id = None
                     matched_category = None
