@@ -1049,25 +1049,29 @@ def filter_tickets():
 
 def clean_email_content_with_llm(email_content: str) -> str:
     """
-    Clean email content using LLM to remove signatures, reply chains, and extract main message.
+    Clean email content using LLM to extract ONLY the NEWEST reply content.
+    Removes signatures, reply chains, and extracts only the latest message.
     """
     if not email_content or len(email_content.strip()) < 10:
         return email_content
     
     try:
         system_prompt = (
-            "You are an email content cleaner. Your task is to extract the main message content "
-            "from an email, removing signatures, disclaimers, reply chains, and other noise. "
-            "Return only the clean, relevant message content. If the email is just a reply chain "
-            "with no new content, return 'No new content'."
+            "You are an email content extractor. Your task is to extract ONLY the NEWEST/LATEST reply content "
+            "from an email thread. Ignore all quoted messages, original messages, signatures, and disclaimers. "
+            "Extract ONLY the new content that the sender added in this specific email. "
+            "If the email contains a reply thread, extract ONLY the content that appears BEFORE any separators "
+            "like '-----Original Message-----', 'From:', 'Sent:', 'Subject:', or quoted blocks. "
+            "Return only the newest message content. If there's no new content (only quoted text), return 'No new content'."
         )
         
         user_prompt = f"""
-        Clean this email content and extract only the main message:
+        Extract ONLY the NEWEST reply content from this email. Ignore all quoted/original messages:
         
         {email_content[:2000]}  # Limit to first 2000 chars to avoid token limits
         
-        Return only the cleaned message content, nothing else.
+        Return ONLY the newest message content that the sender wrote in this email, nothing else.
+        Do NOT include any quoted text, original messages, or signatures.
         """
         
         response = llm_client.chat.completions.create(
@@ -1107,10 +1111,8 @@ def clean_email_content_with_llm(email_content: str) -> str:
 
 def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -> str:
     """
-    Extract the main message content from an HTML email body.
-    Heuristics:
-      - Strip HTML tags
-      - Stop before common reply/forward separators and signatures
+    Extract ONLY the NEWEST reply content from an HTML email body.
+    Stops at common reply/forward separators to get only the latest message.
     """
     if not html_body:
         return fallback_preview or ""
@@ -1125,19 +1127,26 @@ def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -
         lines = [line.strip() for line in text.splitlines()]
 
         main_lines = []
+        found_separator = False
+        
         for line in lines:
-            # Stop at common separators / quoted blocks
+            # Stop at common separators / quoted blocks (these indicate original message)
             lower = line.lower()
             if (
                 line.startswith("-----Original Message")
-                or "original message" in lower
+                or "-----original message" in lower
                 or line.startswith("________________")  # Outlook separators
                 or lower.startswith("from: ")
                 or lower.startswith("sent: ")
                 or lower.startswith("subject: ")
+                or lower.startswith("to: ")
+                or lower.startswith("date: ")
                 or "get outlook for" in lower
                 or "get <https://aka.ms" in lower
+                or line.startswith(">")  # Quoted lines often start with >
+                or (line.startswith("On ") and ("wrote:" in lower or "said:" in lower))  # "On [date] [person] wrote:"
             ):
+                found_separator = True
                 break
 
             # Skip very noisy / empty lines at top
@@ -1150,8 +1159,13 @@ def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -
             main_lines.append(line)
 
         cleaned = "\n".join(main_lines).strip()
+        
+        # If we found a separator, we got the new content (good)
+        # If no separator found but we have content, return it
+        # If no content, use preview as fallback
         if not cleaned:
             return fallback_preview or text.strip()
+        
         return cleaned
     except Exception:
         # Fallback: return preview or raw text
