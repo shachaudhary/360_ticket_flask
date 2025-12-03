@@ -1106,31 +1106,44 @@ def clean_email_content_with_llm(email_content: str) -> str:
         # Remove all special tokens if still present
         cleaned_content = re.sub(r"<\|[^|]+\|>", "", cleaned_content).strip()
         
-        # Remove any analysis/explanation text
-        # If content starts with analysis keywords, try to find actual message
-        analysis_keywords = ["we need to", "the user says", "we must", "let's parse", "the block starts"]
-        if any(keyword in cleaned_content.lower()[:100] for keyword in analysis_keywords):
-            # Try to find the actual message content (usually quoted or at the end)
-            # Look for content in quotes or after ":" or "."
-            quote_match = re.search(r'["\']([^"\']{10,})["\']', cleaned_content)
+        # Check if response contains analysis/thinking content
+        analysis_indicators = [
+            "we need to", "the user says", "we must", "let's parse", "the block starts",
+            "analysis", "extract", "we should", "the instruction", "we have a",
+            "the email text is", "we need to identify", "let's parse:", "the conversation shows"
+        ]
+        
+        has_analysis = any(indicator in cleaned_content.lower()[:200] for indicator in analysis_indicators)
+        
+        # If content looks like analysis, try to extract actual message
+        if has_analysis:
+            print(f"⚠️ LLM returned analysis content, attempting to extract actual message...")
+            
+            # Try to find content in code blocks or quotes
+            code_block_match = re.search(r'```[^`]*```', cleaned_content, re.DOTALL)
+            if code_block_match:
+                cleaned_content = code_block_match.group(0).replace('```', '').strip()
+            
+            # Try to find quoted content
+            quote_match = re.search(r'["\']([^"\']{20,})["\']', cleaned_content)
             if quote_match:
                 cleaned_content = quote_match.group(1).strip()
-            else:
-                # Try to get last sentence that's not analysis
-                sentences = cleaned_content.split('.')
-                for sentence in reversed(sentences):
-                    sentence = sentence.strip()
-                    if len(sentence) > 10 and not any(kw in sentence.lower() for kw in analysis_keywords):
-                        cleaned_content = sentence
-                        break
+            
+            # Try to find content after ":" that looks like actual message
+            colon_match = re.search(r':\s*([A-Z][^:]{20,})', cleaned_content)
+            if colon_match:
+                cleaned_content = colon_match.group(1).strip()
+            
+            # If still contains analysis, use fallback
+            if any(indicator in cleaned_content.lower()[:100] for indicator in analysis_indicators):
+                print(f"⚠️ Still contains analysis, using fallback extraction")
+                return extract_simple_newest_content(email_content)
         
-        # If LLM says no content or content looks like analysis, use fallback
+        # Final validation - if content is too long or contains analysis keywords, use fallback
         if (cleaned_content.lower() in ["no new content", "no content", "none", ""] or
-            len(cleaned_content) > 500 or 
-            "analysis" in cleaned_content.lower() or 
-            "extract" in cleaned_content.lower() or
-            "we need to" in cleaned_content.lower()[:50]):
-            print(f"⚠️ LLM returned analysis/empty content, using fallback extraction")
+            len(cleaned_content) > 1000 or 
+            any(indicator in cleaned_content.lower()[:100] for indicator in analysis_indicators)):
+            print(f"⚠️ LLM content validation failed, using fallback extraction")
             return extract_simple_newest_content(email_content)
         
         return cleaned_content
@@ -1179,27 +1192,46 @@ def extract_simple_newest_content(email_content: str) -> str:
     
     # Remove signature patterns (lines with titles, emails, etc.)
     filtered_lines = []
+    signature_detected = False
+    
     for line in lines:
-        # Skip lines that look like signatures
-        if (
-            "@" in line and ("com" in line.lower() or "net" in line.lower() or "org" in line.lower())
-            or line.lower().endswith("manager")
-            or line.lower().endswith("director")
-            or "office" in line.lower() and "manager" in line.lower()
-        ):
-            # This might be a signature, but include it if it's short
-            if len(line) < 100:
-                filtered_lines.append(line)
-        else:
-            filtered_lines.append(line)
+        # Detect signature start patterns
+        if (line.lower().endswith("manager") or 
+            line.lower().endswith("director") or
+            ("office" in line.lower() and "manager" in line.lower()) or
+            ("dental" in line.lower() and len(line) < 50)):
+            signature_detected = True
+        
+        # Stop at signature
+        if signature_detected:
+            break
+            
+        # Skip lines that look like email addresses or signatures
+        if "@" in line and ("com" in line.lower() or "net" in line.lower() or "org" in line.lower()):
+            if len(line) > 50:  # Likely signature
+                signature_detected = True
+                break
+            continue
+        
+        filtered_lines.append(line)
     
     result = "\n".join(filtered_lines).strip()
     
-    # Return first 500 chars if too long
-    if len(result) > 500:
-        return result[:500] + "..."
+    # If result is too short or empty, try to get more content
+    if len(result) < 10:
+        # Maybe separator wasn't found, try to get first meaningful paragraph
+        paragraphs = text.split('\n\n')
+        for para in paragraphs:
+            para = para.strip()
+            if len(para) > 20 and not para.lower().startswith(('from:', 'sent:', 'to:', 'subject:', 'date:')):
+                result = para
+                break
     
-    return result if result else email_content[:300]
+    # Return first 1000 chars if too long (don't truncate too aggressively)
+    if len(result) > 1000:
+        return result[:1000]
+    
+    return result if result else (email_content[:500] if email_content else "")
 
 
 
@@ -1288,7 +1320,7 @@ def _process_emails_internal():
             return {"error": "Failed to get Microsoft Graph access token", "status": "error"}
         
         # Calculate time 10 minutes ago (in UTC)
-        ten_minutes_ago = datetime.utcnow() - timedelta(minutes=10)
+        ten_minutes_ago = datetime.utcnow() - timedelta(minutes=7000)
         # Format for Microsoft Graph API (ISO 8601 format)
         time_filter = ten_minutes_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
         
@@ -1372,6 +1404,20 @@ def _process_emails_internal():
                     skipped_count += 1
                     continue
                 
+                # CRITICAL: Check conversation_id EARLY to prevent duplicate tickets
+                # This must be checked BEFORE processing content to avoid race conditions
+                existing_conversation = None
+                if conversation_id:
+                    # Check if ANY email in this conversation already has a ticket
+                    existing_conversation = EmailProcessedLog.query.filter_by(
+                        conversation_id=conversation_id
+                    ).filter(
+                        EmailProcessedLog.ticket_id.isnot(None)  # Only get entries with tickets
+                    ).order_by(EmailProcessedLog.processed_at.desc()).first()  # Get most recent
+                    
+                    if existing_conversation:
+                        print(f"🔍 Found existing conversation {conversation_id} with ticket #{existing_conversation.ticket_id}")
+                
                 # Get user_id from sender email
                 user_id = None
                 if sender_email:
@@ -1390,20 +1436,22 @@ def _process_emails_internal():
                 else:
                     initial_content = (raw_body or body_preview or "").strip()
                 
-                # Clean email content using LLM
+                # Clean email content using LLM (with fallback to simple extraction)
                 print(f"🧹 Cleaning email content with LLM...")
                 main_content = clean_email_content_with_llm(initial_content)
-                print(f"✅ Email content cleaned: {len(main_content)} characters")
                 
-                # Check if conversation already has a ticket (duplicate detection)
-                # This should be checked BEFORE processing to prevent duplicate tickets
-                existing_conversation = None
-                if conversation_id:
-                    existing_conversation = EmailProcessedLog.query.filter_by(
-                        conversation_id=conversation_id
-                    ).filter(
-                        EmailProcessedLog.ticket_id.isnot(None)  # Only get entries with tickets
-                    ).first()
+                # Validate extracted content - if it looks like analysis or is empty, use fallback
+                if (not main_content or 
+                    len(main_content.strip()) < 5 or
+                    "analysis" in main_content.lower()[:100] or
+                    "the conversation shows" in main_content.lower()[:100] or
+                    "we need to" in main_content.lower()[:100] or
+                    main_content.startswith("s any") or  # Common analysis fragment
+                    main_content.startswith("the block")):
+                    print(f"⚠️ LLM returned invalid content, using simple extraction...")
+                    main_content = extract_simple_newest_content(initial_content)
+                
+                print(f"✅ Email content cleaned: {len(main_content)} characters")
                 
                 # If conversation exists and has a ticket, add as comment (follow-up)
                 if existing_conversation and existing_conversation.ticket_id:
@@ -1470,24 +1518,19 @@ def _process_emails_internal():
                         print(f"⚠️ Ticket {existing_conversation.ticket_id} not found for conversation {conversation_id}")
                 else:
                     # New conversation: Create new ticket
-                    # Double-check this email wasn't already processed (race condition protection)
-                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
-                    if existing_email_check:
-                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
-                        skipped_count += 1
-                        continue
-                    
-                    # Also check if conversation_id exists but wasn't caught above (safety check)
+                    # CRITICAL: Double-check conversation_id wasn't missed (race condition protection)
                     if conversation_id:
-                        safety_check = EmailProcessedLog.query.filter_by(
+                        # Re-check conversation_id one more time before creating ticket
+                        final_conversation_check = EmailProcessedLog.query.filter_by(
                             conversation_id=conversation_id
                         ).filter(
                             EmailProcessedLog.ticket_id.isnot(None)
                         ).first()
-                        if safety_check:
-                            print(f"⚠️ Conversation {conversation_id} already has ticket #{safety_check.ticket_id}, adding as comment instead...")
+                        
+                        if final_conversation_check:
+                            print(f"⚠️ Conversation {conversation_id} already has ticket #{final_conversation_check.ticket_id} (race condition), adding as comment instead...")
                             # Add as comment instead of creating new ticket
-                            ticket = Ticket.query.get(safety_check.ticket_id)
+                            ticket = Ticket.query.get(final_conversation_check.ticket_id)
                             if ticket:
                                 comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
                                 
@@ -1539,6 +1582,13 @@ def _process_emails_internal():
                                     skipped_count += 1
                             continue
                     
+                    # Double-check this email wasn't already processed (race condition protection)
+                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+                    if existing_email_check:
+                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
+                        skipped_count += 1
+                        continue
+                    
                     # Use IT category for all email tickets
                     category_id = None
                     matched_category = None
@@ -1552,7 +1602,47 @@ def _process_emails_internal():
                         matched_category = it_category
                         print(f"✅ Using IT category for email ticket")
                     
-                    # Create ticket
+                    # FINAL CHECK: One more time check conversation_id before creating ticket
+                    # This is critical to prevent duplicates when multiple emails arrive simultaneously
+                    if conversation_id:
+                        last_check = EmailProcessedLog.query.filter_by(
+                            conversation_id=conversation_id
+                        ).filter(
+                            EmailProcessedLog.ticket_id.isnot(None)
+                        ).first()
+                        
+                        if last_check:
+                            print(f"🚨 CRITICAL: Conversation {conversation_id} found ticket #{last_check.ticket_id} at last moment, aborting ticket creation!")
+                            # Add as comment instead
+                            ticket = Ticket.query.get(last_check.ticket_id)
+                            if ticket:
+                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                                comment = TicketComment(
+                                    ticket_id=ticket.id,
+                                    user_id=user_id,
+                                    comment=comment_text
+                                )
+                                db.session.add(comment)
+                                
+                                email_log = EmailProcessedLog(
+                                    email_id=email_id,
+                                    conversation_id=conversation_id,
+                                    ticket_id=ticket.id,
+                                    sender_email=sender_email,
+                                    user_id=user_id,
+                                    email_subject=subject,
+                                    is_followup=True
+                                )
+                                db.session.add(email_log)
+                                db.session.commit()
+                                
+                                comments_added += 1
+                                processed_count += 1
+                                print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
+                                continue
+                    
+                    # Create ticket (only if all checks passed)
+                    print(f"📝 Creating new ticket for conversation_id: {conversation_id or 'None'}")
                     ticket = Ticket(
                         clinic_id=None,  # Can be set later if needed
                         title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
@@ -1566,6 +1656,8 @@ def _process_emails_internal():
                     )
                     db.session.add(ticket)
                     db.session.commit()
+                    
+                    print(f"✅ Created ticket #{ticket.id} for conversation_id: {conversation_id}")
                     
                     # Auto-assign if category has assignee
                     if matched_category and matched_category.assignee_id:
@@ -1588,7 +1680,8 @@ def _process_emails_internal():
                                 message=f"Auto-assigned from email: {subject}"
                             )
                     
-                    # Log email as processed
+                    # Log email as processed IMMEDIATELY after ticket creation
+                    # This must happen before processing next email to prevent duplicates
                     email_log = EmailProcessedLog(
                         email_id=email_id,
                         conversation_id=conversation_id,
@@ -1600,6 +1693,8 @@ def _process_emails_internal():
                     )
                     db.session.add(email_log)
                     db.session.commit()
+                    
+                    print(f"✅ Logged email {email_id} → ticket #{ticket.id} for conversation {conversation_id}")
                     
                     tickets_created += 1
                     processed_count += 1
