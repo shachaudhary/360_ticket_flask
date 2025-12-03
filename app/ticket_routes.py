@@ -1057,22 +1057,17 @@ def clean_email_content_with_llm(email_content: str) -> str:
     
     try:
         system_prompt = (
-            "You are an email content extractor. Your task is to extract ONLY the NEWEST/LATEST reply content "
-            "from an email thread. Ignore all quoted messages, original messages, signatures, and disclaimers. "
-            "Extract ONLY the new content that the sender added in this specific email. "
-            "If the email contains a reply thread, extract ONLY the content that appears BEFORE any separators "
-            "like '-----Original Message-----', 'From:', 'Sent:', 'Subject:', or quoted blocks. "
-            "Return only the newest message content. If there's no new content (only quoted text), return 'No new content'."
+            "Extract ONLY the newest reply message from an email thread. "
+            "Return ONLY the text that the sender wrote in THIS email, nothing else. "
+            "Do NOT include any analysis, explanation, or reasoning. "
+            "Do NOT include quoted messages, original messages, signatures, or disclaimers. "
+            "If you see email headers like 'From:', 'Sent:', 'To:', 'Subject:', stop there - that's the start of quoted content. "
+            "Return ONLY the actual message text. If no new content exists, return exactly: 'No new content'"
         )
         
-        user_prompt = f"""
-        Extract ONLY the NEWEST reply content from this email. Ignore all quoted/original messages:
-        
-        {email_content[:2000]}  # Limit to first 2000 chars to avoid token limits
-        
-        Return ONLY the newest message content that the sender wrote in this email, nothing else.
-        Do NOT include any quoted text, original messages, or signatures.
-        """
+        user_prompt = f"""Extract ONLY the newest message from this email. Return ONLY the message text, no analysis:
+
+{email_content[:2000]}"""
         
         response = llm_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -1081,30 +1076,130 @@ def clean_email_content_with_llm(email_content: str) -> str:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
-            max_tokens=500
+            max_tokens=300
         )
         
         cleaned_content = response.choices[0].message.content.strip()
         
-        # Extract final message if wrapped in special format
-        match = re.search(
-            r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
+        # Handle LLM's structured output format with analysis channels
+        # Pattern: <|channel|>analysis<|message|>...<|channel|>final<|message|>ACTUAL_CONTENT
+        
+        # First, try to extract final message from structured format
+        final_match = re.search(
+            r"<\|channel\|>final<\|message\|>(.*?)(?:<\|channel\|>|$)",
             cleaned_content,
             re.DOTALL
         )
-        if match:
-            cleaned_content = match.group(1).strip()
+        if final_match:
+            cleaned_content = final_match.group(1).strip()
         
-        # If LLM says no content, return original (fallback)
-        if cleaned_content.lower() in ["no new content", "no content", "none"]:
-            return email_content[:500]  # Return first 500 chars as fallback
+        # Also try alternative format
+        if not cleaned_content or "<|channel|>" in cleaned_content:
+            alt_match = re.search(
+                r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*)",
+                cleaned_content,
+                re.DOTALL
+            )
+            if alt_match:
+                cleaned_content = alt_match.group(1).strip()
+        
+        # Remove all special tokens if still present
+        cleaned_content = re.sub(r"<\|[^|]+\|>", "", cleaned_content).strip()
+        
+        # Remove any analysis/explanation text
+        # If content starts with analysis keywords, try to find actual message
+        analysis_keywords = ["we need to", "the user says", "we must", "let's parse", "the block starts"]
+        if any(keyword in cleaned_content.lower()[:100] for keyword in analysis_keywords):
+            # Try to find the actual message content (usually quoted or at the end)
+            # Look for content in quotes or after ":" or "."
+            quote_match = re.search(r'["\']([^"\']{10,})["\']', cleaned_content)
+            if quote_match:
+                cleaned_content = quote_match.group(1).strip()
+            else:
+                # Try to get last sentence that's not analysis
+                sentences = cleaned_content.split('.')
+                for sentence in reversed(sentences):
+                    sentence = sentence.strip()
+                    if len(sentence) > 10 and not any(kw in sentence.lower() for kw in analysis_keywords):
+                        cleaned_content = sentence
+                        break
+        
+        # If LLM says no content or content looks like analysis, use fallback
+        if (cleaned_content.lower() in ["no new content", "no content", "none", ""] or
+            len(cleaned_content) > 500 or 
+            "analysis" in cleaned_content.lower() or 
+            "extract" in cleaned_content.lower() or
+            "we need to" in cleaned_content.lower()[:50]):
+            print(f"⚠️ LLM returned analysis/empty content, using fallback extraction")
+            return extract_simple_newest_content(email_content)
         
         return cleaned_content
         
     except Exception as e:
         print(f"⚠️ Error cleaning email content with LLM: {e}")
-        # Fallback to original content
-        return email_content[:1000] if len(email_content) > 1000 else email_content
+        # Fallback to simple extraction
+        return extract_simple_newest_content(email_content)
+
+
+def extract_simple_newest_content(email_content: str) -> str:
+    """
+    Simple fallback extraction: Get content before first email separator.
+    This extracts the newest reply without LLM.
+    """
+    if not email_content:
+        return ""
+    
+    # Remove HTML tags if present
+    text = re.sub(r"<[^>]+>", "", email_content)
+    text = html.unescape(text)
+    
+    # Split by common separators
+    separators = [
+        "-----Original Message-----",
+        "From:",
+        "Sent:",
+        "To:",
+        "Subject:",
+        "Date:",
+        "On "  # "On [date] [person] wrote:"
+    ]
+    
+    # Find the first separator
+    first_separator_pos = len(text)
+    for sep in separators:
+        pos = text.find(sep)
+        if pos != -1 and pos < first_separator_pos:
+            first_separator_pos = pos
+    
+    # Extract content before first separator
+    newest_content = text[:first_separator_pos].strip()
+    
+    # Clean up: remove empty lines at start/end
+    lines = [line.strip() for line in newest_content.splitlines() if line.strip()]
+    
+    # Remove signature patterns (lines with titles, emails, etc.)
+    filtered_lines = []
+    for line in lines:
+        # Skip lines that look like signatures
+        if (
+            "@" in line and ("com" in line.lower() or "net" in line.lower() or "org" in line.lower())
+            or line.lower().endswith("manager")
+            or line.lower().endswith("director")
+            or "office" in line.lower() and "manager" in line.lower()
+        ):
+            # This might be a signature, but include it if it's short
+            if len(line) < 100:
+                filtered_lines.append(line)
+        else:
+            filtered_lines.append(line)
+    
+    result = "\n".join(filtered_lines).strip()
+    
+    # Return first 500 chars if too long
+    if len(result) > 500:
+        return result[:500] + "..."
+    
+    return result if result else email_content[:300]
 
 
 
