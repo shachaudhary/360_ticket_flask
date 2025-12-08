@@ -1379,6 +1379,35 @@ def _process_emails_internal():
                 sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
                 sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
                 
+                # Extract email received time to use as ticket created_at
+                received_datetime_str = email.get("receivedDateTime")
+                email_received_time = None
+                if received_datetime_str:
+                    try:
+                        # Parse ISO 8601 format from Microsoft Graph API (e.g., "2024-01-15T10:30:00Z")
+                        # Replace 'Z' with '+00:00' for fromisoformat compatibility
+                        iso_str = received_datetime_str.replace('Z', '+00:00')
+                        # Handle microseconds if present
+                        if '.' in iso_str and '+' in iso_str:
+                            # Format: 2024-01-15T10:30:00.123456+00:00
+                            email_received_time = datetime.fromisoformat(iso_str)
+                        elif '+' in iso_str:
+                            # Format: 2024-01-15T10:30:00+00:00
+                            email_received_time = datetime.fromisoformat(iso_str)
+                        else:
+                            # Try strptime as fallback
+                            email_received_time = datetime.strptime(received_datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+                        # Convert to UTC naive datetime (since database stores UTC)
+                        if email_received_time.tzinfo:
+                            email_received_time = email_received_time.replace(tzinfo=None)
+                    except Exception as e:
+                        print(f"⚠️ Error parsing receivedDateTime '{received_datetime_str}': {e}")
+                        # Fallback to current time if parsing fails
+                        email_received_time = datetime.utcnow()
+                else:
+                    # Fallback to current time if receivedDateTime is missing
+                    email_received_time = datetime.utcnow()
+                
                 # Skip if already processed (check by email_id first - most important check)
                 existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
                 if existing_log:
@@ -1653,6 +1682,7 @@ def _process_emails_internal():
                         due_date=None,
                         user_id=user_id,  # Sender as creator
                         location_id=None,
+                        created_at=email_received_time  # Use exact email received time
                     )
                     db.session.add(ticket)
                     db.session.commit()
@@ -1738,4 +1768,350 @@ def process_emails():
     
     # If it's already a Flask response, return it
     return result
+
+
+@ticket_bp.route("/check_missing_tickets", methods=["GET"])
+@require_api_key
+def check_missing_tickets():
+    """
+    API endpoint to check for emails that should have tickets but don't.
+    Returns emails that were processed but no ticket was created.
+    
+    Query parameters:
+    - hours: Number of hours to look back (default: 24)
+    - include_system: Include system notification emails (default: False)
+    """
+    try:
+        from datetime import timedelta
+        
+        # Get query parameters
+        hours = request.args.get("hours", 24, type=int)
+        include_system = request.args.get("include_system", "false").lower() == "true"
+        
+        # Calculate time threshold
+        time_threshold = datetime.utcnow() - timedelta(hours=hours)
+        
+        # System email patterns to identify notification emails
+        system_email_patterns = [
+            "Dental360 New Ticket Assigned:",
+            "Dental360 Ticket",
+            "SUPPORT 360",
+            "Ticket Assigned",
+            "Ticket Updated",
+            "Ticket Followed Update",
+            "Category Updated",
+            "Contact Form Category Updated"
+        ]
+        
+        # Query emails that were processed but have no ticket_id
+        # Exclude follow-ups (they don't need tickets) and optionally system emails
+        query = EmailProcessedLog.query.filter(
+            EmailProcessedLog.ticket_id.is_(None),
+            EmailProcessedLog.processed_at >= time_threshold
+        )
+        
+        # Exclude follow-ups (they're comments, not new tickets)
+        query = query.filter(EmailProcessedLog.is_followup == False)
+        
+        missing_tickets = query.order_by(EmailProcessedLog.processed_at.desc()).all()
+        
+        result = []
+        for log in missing_tickets:
+            # Skip system emails unless explicitly included
+            if not include_system and log.email_subject:
+                is_system_email = any(pattern in log.email_subject for pattern in system_email_patterns)
+                if is_system_email:
+                    continue
+            
+            # Check if this email's conversation has a ticket (might be a follow-up that wasn't marked)
+            has_conversation_ticket = False
+            if log.conversation_id:
+                conversation_ticket = EmailProcessedLog.query.filter(
+                    EmailProcessedLog.conversation_id == log.conversation_id,
+                    EmailProcessedLog.ticket_id.isnot(None)
+                ).first()
+                if conversation_ticket:
+                    has_conversation_ticket = True
+            
+            result.append({
+                "email_id": log.email_id,
+                "conversation_id": log.conversation_id,
+                "sender_email": log.sender_email,
+                "email_subject": log.email_subject,
+                "user_id": log.user_id,
+                "processed_at": log.processed_at.isoformat() if log.processed_at else None,
+                "is_followup": log.is_followup,
+                "has_conversation_ticket": has_conversation_ticket,
+                "conversation_ticket_id": conversation_ticket.ticket_id if has_conversation_ticket else None,
+                "reason": "followup_in_conversation" if has_conversation_ticket else "no_ticket_created"
+            })
+        
+        return jsonify({
+            "status": "success",
+            "total_missing": len(result),
+            "time_range_hours": hours,
+            "time_threshold": time_threshold.isoformat(),
+            "missing_tickets": result,
+            "summary": {
+                "total_processed": EmailProcessedLog.query.filter(
+                    EmailProcessedLog.processed_at >= time_threshold
+                ).count(),
+                "with_tickets": EmailProcessedLog.query.filter(
+                    EmailProcessedLog.ticket_id.isnot(None),
+                    EmailProcessedLog.processed_at >= time_threshold
+                ).count(),
+                "missing_tickets": len(result),
+                "followups": EmailProcessedLog.query.filter(
+                    EmailProcessedLog.is_followup == True,
+                    EmailProcessedLog.processed_at >= time_threshold
+                ).count()
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error checking missing tickets: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/reprocess_email/<email_id>", methods=["POST"])
+@require_api_key
+def reprocess_email(email_id):
+    """
+    Manually reprocess a specific email by email_id.
+    Useful for retrying emails that failed to create tickets.
+    
+    This will:
+    1. Check if email was already processed
+    2. If ticket exists, skip
+    3. If no ticket, attempt to create one
+    """
+    try:
+        import os
+        from flask import current_app
+        
+        # Get email address to monitor
+        email_address = os.getenv("MICROSOFT_EMAIL", "it.support@dental360grp.com")
+        
+        # Get access token
+        token = get_graph_token()
+        if not token:
+            return jsonify({"error": "Failed to get Microsoft Graph access token"}), 500
+        
+        # Check if email was already processed
+        existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+        if existing_log and existing_log.ticket_id:
+            return jsonify({
+                "status": "already_processed",
+                "message": f"Email already processed with ticket_id: {existing_log.ticket_id}",
+                "ticket_id": existing_log.ticket_id,
+                "email_log": {
+                    "email_id": existing_log.email_id,
+                    "conversation_id": existing_log.conversation_id,
+                    "sender_email": existing_log.sender_email,
+                    "email_subject": existing_log.email_subject,
+                    "processed_at": existing_log.processed_at.isoformat() if existing_log.processed_at else None
+                }
+            }), 200
+        
+        # Fetch email from Microsoft Graph API
+        base_url = f"{GRAPH_BASE_URL}/users/{email_address}/messages/{email_id}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            base_url,
+            headers=headers,
+            params={'$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,body,hasAttachments,conversationId'},
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": "Failed to fetch email from Microsoft Graph",
+                "status_code": response.status_code,
+                "details": response.text
+            }), 500
+        
+        email = response.json()
+        
+        # Process this single email using the same logic as _process_emails_internal
+        # We'll create a simplified version here
+        email_id_from_api = email.get("id")
+        conversation_id = email.get("conversationId")
+        subject = email.get("subject", "")
+        sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
+        sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+        
+        # Extract received time
+        received_datetime_str = email.get("receivedDateTime")
+        email_received_time = None
+        if received_datetime_str:
+            try:
+                iso_str = received_datetime_str.replace('Z', '+00:00')
+                if '.' in iso_str and '+' in iso_str:
+                    email_received_time = datetime.fromisoformat(iso_str)
+                elif '+' in iso_str:
+                    email_received_time = datetime.fromisoformat(iso_str)
+                else:
+                    email_received_time = datetime.strptime(received_datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+                if email_received_time.tzinfo:
+                    email_received_time = email_received_time.replace(tzinfo=None)
+            except Exception as e:
+                print(f"⚠️ Error parsing receivedDateTime: {e}")
+                email_received_time = datetime.utcnow()
+        else:
+            email_received_time = datetime.utcnow()
+        
+        # Check if conversation already has a ticket
+        if conversation_id:
+            existing_conversation = EmailProcessedLog.query.filter_by(
+                conversation_id=conversation_id
+            ).filter(
+                EmailProcessedLog.ticket_id.isnot(None)
+            ).first()
+            
+            if existing_conversation:
+                # Add as comment instead
+                ticket = Ticket.query.get(existing_conversation.ticket_id)
+                if ticket:
+                    user_id = get_user_id_by_email(sender_email) if sender_email else None
+                    raw_body = email.get("body", {}).get("content") if email.get("body") else None
+                    content_type = email.get("body", {}).get("contentType") if email.get("body") else None
+                    body_preview = email.get("bodyPreview", "")
+                    
+                    if content_type and content_type.lower() == "html":
+                        initial_content = extract_main_content_from_html(raw_body or "", body_preview)
+                    else:
+                        initial_content = (raw_body or body_preview or "").strip()
+                    
+                    main_content = clean_email_content_with_llm(initial_content)
+                    comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                    
+                    comment = TicketComment(
+                        ticket_id=ticket.id,
+                        user_id=user_id,
+                        comment=comment_text
+                    )
+                    db.session.add(comment)
+                    
+                    # Update or create log
+                    if existing_log:
+                        existing_log.ticket_id = ticket.id
+                        existing_log.is_followup = True
+                    else:
+                        email_log = EmailProcessedLog(
+                            email_id=email_id_from_api,
+                            conversation_id=conversation_id,
+                            ticket_id=ticket.id,
+                            sender_email=sender_email,
+                            user_id=user_id,
+                            email_subject=subject,
+                            is_followup=True
+                        )
+                        db.session.add(email_log)
+                    
+                    db.session.commit()
+                    
+                    return jsonify({
+                        "status": "success",
+                        "message": "Added as comment to existing ticket",
+                        "ticket_id": ticket.id,
+                        "action": "comment_added"
+                    }), 200
+        
+        # Create new ticket
+        user_id = get_user_id_by_email(sender_email) if sender_email else None
+        
+        raw_body = email.get("body", {}).get("content") if email.get("body") else None
+        content_type = email.get("body", {}).get("contentType") if email.get("body") else None
+        body_preview = email.get("bodyPreview", "")
+        
+        if content_type and content_type.lower() == "html":
+            initial_content = extract_main_content_from_html(raw_body or "", body_preview)
+        else:
+            initial_content = (raw_body or body_preview or "").strip()
+        
+        main_content = clean_email_content_with_llm(initial_content)
+        
+        # Find IT category
+        category_id = None
+        matched_category = None
+        it_category = Category.query.filter(Category.name.ilike("IT")).first()
+        if it_category:
+            category_id = it_category.id
+            matched_category = it_category
+        
+        ticket = Ticket(
+            clinic_id=None,
+            title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
+            details=main_content or "(no content)",
+            category_id=category_id,
+            status="Pending",
+            priority="low",
+            due_date=None,
+            user_id=user_id,
+            location_id=None,
+            created_at=email_received_time
+        )
+        db.session.add(ticket)
+        db.session.commit()
+        
+        # Auto-assign if category has assignee
+        if matched_category and matched_category.assignee_id:
+            assignment = TicketAssignment(
+                ticket_id=ticket.id,
+                assign_to=matched_category.assignee_id,
+                assign_by=None
+            )
+            db.session.add(assignment)
+            db.session.commit()
+            
+            assignee_info = get_user_info_by_id(matched_category.assignee_id)
+            if assignee_info:
+                send_assign_email(ticket, assignee_info, {"username": "System"})
+                create_notification(
+                    ticket_id=ticket.id,
+                    receiver_id=matched_category.assignee_id,
+                    sender_id=None,
+                    notification_type="assign",
+                    message=f"Auto-assigned from email: {subject}"
+                )
+        
+        # Update or create log
+        if existing_log:
+            existing_log.ticket_id = ticket.id
+            existing_log.is_followup = False
+        else:
+            email_log = EmailProcessedLog(
+                email_id=email_id_from_api,
+                conversation_id=conversation_id,
+                ticket_id=ticket.id,
+                sender_email=sender_email,
+                user_id=user_id,
+                email_subject=subject,
+                is_followup=False
+            )
+            db.session.add(email_log)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "status": "success",
+            "message": "Ticket created successfully",
+            "ticket_id": ticket.id,
+            "action": "ticket_created"
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error reprocessing email {email_id}: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
