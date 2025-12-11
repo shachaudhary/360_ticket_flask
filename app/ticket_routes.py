@@ -850,6 +850,7 @@ def get_ticket(ticket_id):
             "note": f.note,
             "user_id": f.user_id,
             "username": u_info.get("username") if u_info else None,
+            "email": u_info.get("email") if u_info else None,
             "followup_date": f.followup_date,
             "created_at": f.created_at
         })
