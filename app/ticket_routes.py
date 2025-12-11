@@ -1666,7 +1666,8 @@ def _process_emails_internal():
                     # Fallback to current time if receivedDateTime is missing
                     email_received_time = datetime.utcnow()
                 
-                # Skip if already processed (check by email_id first - most important check)
+                # CRITICAL: Skip if already processed (check by email_id first - most important check)
+                # Use database query with lock to prevent race conditions
                 existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
                 if existing_log:
                     print(f"⏭️ Email {email_id} already processed, skipping...")
@@ -1676,18 +1677,51 @@ def _process_emails_internal():
                 # Skip system-generated notification emails (prevent infinite loops)
                 if subject and any(pattern in subject for pattern in system_email_patterns):
                     print(f"⏭️ Skipping system notification email: {subject}")
-                    # Still log it as processed to avoid reprocessing
-                    email_log = EmailProcessedLog(
+                    # Try to log it as processed - if duplicate, skip
+                    try:
+                        email_log = EmailProcessedLog(
+                            email_id=email_id,
+                            conversation_id=conversation_id,
+                            ticket_id=None,
+                            sender_email=sender_email,
+                            user_id=None,
+                            email_subject=subject,
+                            is_followup=False
+                        )
+                        db.session.add(email_log)
+                        db.session.commit()
+                    except Exception as e:
+                        # Already exists (race condition), skip
+                        db.session.rollback()
+                        print(f"⏭️ System email {email_id} already logged, skipping...")
+                    skipped_count += 1
+                    continue
+                
+                # CRITICAL: Reserve email_id IMMEDIATELY to prevent race conditions
+                # Try to create a placeholder log entry - if it fails, email is already being processed
+                placeholder_log = None
+                try:
+                    placeholder_log = EmailProcessedLog(
                         email_id=email_id,
                         conversation_id=conversation_id,
-                        ticket_id=None,
+                        ticket_id=None,  # Will be updated after ticket creation
                         sender_email=sender_email,
-                        user_id=None,
+                        user_id=None,  # Will be updated after user lookup
                         email_subject=subject,
                         is_followup=False
                     )
-                    db.session.add(email_log)
+                    db.session.add(placeholder_log)
                     db.session.commit()
+                    print(f"🔒 Reserved email_id {email_id} for processing")
+                except Exception as e:
+                    # Unique constraint violation or other DB error - email already being processed
+                    db.session.rollback()
+                    # Check if it's a unique constraint violation
+                    import sqlalchemy
+                    if isinstance(e, sqlalchemy.exc.IntegrityError) or "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                        print(f"⏭️ Email {email_id} already being processed (unique constraint violation), skipping...")
+                    else:
+                        print(f"⏭️ Email {email_id} reservation failed: {e}, skipping...")
                     skipped_count += 1
                     continue
                 
@@ -1718,17 +1752,19 @@ def _process_emails_internal():
                 body_preview = email.get("bodyPreview", "")
                 
                 # Get raw email content for comments (preserve everything)
-                # Prefer body_preview as it's usually cleaner, fallback to raw_body
-                raw_email_content = body_preview if body_preview else (raw_body or "")
+                # PRIORITIZE raw_body (full content) over body_preview (truncated preview)
                 if content_type and content_type.lower() == "html" and raw_body:
-                    # For HTML emails, extract text but keep more content
+                    # For HTML emails, extract text from full body
                     from html import unescape
                     import re
                     # Remove HTML tags but keep the text
                     text_content = re.sub(r'<[^>]+>', ' ', raw_body)
                     text_content = unescape(text_content)
-                    # Use body_preview if available, otherwise use extracted HTML text
-                    raw_email_content = body_preview if body_preview else text_content
+                    # Use full extracted HTML text (not truncated preview)
+                    raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
+                else:
+                    # For plain text emails, use full raw_body, fallback to preview
+                    raw_email_content = (raw_body or body_preview or "").strip()
                 
                 # Extract main content for analysis (this can be cleaned)
                 if content_type and content_type.lower() == "html":
@@ -1756,12 +1792,7 @@ def _process_emails_internal():
                 # If conversation exists and has a ticket, add as comment (follow-up)
                 if existing_conversation and existing_conversation.ticket_id:
                     # Follow-up: Add as comment to existing ticket
-                    # Double-check this email wasn't already processed (race condition protection)
-                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
-                    if existing_email_check:
-                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
-                        skipped_count += 1
-                        continue
+                    # Note: placeholder_log already exists from earlier reservation
                     
                     ticket = Ticket.query.get(existing_conversation.ticket_id)
                     if ticket:
@@ -1777,17 +1808,10 @@ def _process_emails_internal():
                         
                         if existing_comment:
                             print(f"⏭️ Comment already exists for email {email_id}, skipping...")
-                            # Still log email as processed
-                            email_log = EmailProcessedLog(
-                                email_id=email_id,
-                                conversation_id=conversation_id,
-                                ticket_id=ticket.id,
-                                sender_email=sender_email,
-                                user_id=user_id,
-                                email_subject=subject,
-                                is_followup=True
-                            )
-                            db.session.add(email_log)
+                            # Update placeholder log with ticket info
+                            placeholder_log.ticket_id = ticket.id
+                            placeholder_log.user_id = user_id
+                            placeholder_log.is_followup = True
                             db.session.commit()
                             skipped_count += 1
                             continue
@@ -1799,17 +1823,10 @@ def _process_emails_internal():
                         )
                         db.session.add(comment)
                         
-                        # Log email as processed BEFORE commit to prevent race conditions
-                        email_log = EmailProcessedLog(
-                            email_id=email_id,
-                            conversation_id=conversation_id,
-                            ticket_id=ticket.id,
-                            sender_email=sender_email,
-                            user_id=user_id,
-                            email_subject=subject,
-                            is_followup=True
-                        )
-                        db.session.add(email_log)
+                        # Update placeholder log with ticket_id, user_id, and is_followup flag
+                        placeholder_log.ticket_id = ticket.id
+                        placeholder_log.user_id = user_id
+                        placeholder_log.is_followup = True
                         db.session.commit()
                         
                         comments_added += 1
@@ -1850,17 +1867,10 @@ def _process_emails_internal():
                                     )
                                     db.session.add(comment)
                                     
-                                    # Log email as processed
-                                    email_log = EmailProcessedLog(
-                                        email_id=email_id,
-                                        conversation_id=conversation_id,
-                                        ticket_id=ticket.id,
-                                        sender_email=sender_email,
-                                        user_id=user_id,
-                                        email_subject=subject,
-                                        is_followup=True
-                                    )
-                                    db.session.add(email_log)
+                                    # Update placeholder log with ticket info
+                                    placeholder_log.ticket_id = ticket.id
+                                    placeholder_log.user_id = user_id
+                                    placeholder_log.is_followup = True
                                     db.session.commit()
                                     
                                     comments_added += 1
@@ -1878,17 +1888,16 @@ def _process_emails_internal():
                                         email_subject=subject,
                                         is_followup=True
                                     )
-                                    db.session.add(email_log)
+                                    # Update placeholder log
+                                    placeholder_log.ticket_id = ticket.id
+                                    placeholder_log.user_id = user_id
+                                    placeholder_log.is_followup = True
                                     db.session.commit()
                                     skipped_count += 1
                             continue
                     
-                    # Double-check this email wasn't already processed (race condition protection)
-                    existing_email_check = EmailProcessedLog.query.filter_by(email_id=email_id).first()
-                    if existing_email_check:
-                        print(f"⏭️ Email {email_id} already processed (race condition), skipping...")
-                        skipped_count += 1
-                        continue
+                    # Note: placeholder_log already exists from earlier reservation
+                    # No need to check again - the unique constraint prevents duplicates
                     
                     # Use IT category for all email tickets
                     category_id = None
@@ -1925,16 +1934,10 @@ def _process_emails_internal():
                                 )
                                 db.session.add(comment)
                                 
-                                email_log = EmailProcessedLog(
-                                    email_id=email_id,
-                                    conversation_id=conversation_id,
-                                    ticket_id=ticket.id,
-                                    sender_email=sender_email,
-                                    user_id=user_id,
-                                    email_subject=subject,
-                                    is_followup=True
-                                )
-                                db.session.add(email_log)
+                                # Update placeholder log with ticket info
+                                placeholder_log.ticket_id = ticket.id
+                                placeholder_log.user_id = user_id
+                                placeholder_log.is_followup = True
                                 db.session.commit()
                                 
                                 comments_added += 1
@@ -2001,21 +2004,13 @@ def _process_emails_internal():
                                 message=f"Auto-assigned from email: {subject}"
                             )
                     
-                    # Log email as processed IMMEDIATELY after ticket creation
+                    # Update placeholder log with ticket_id and user_id IMMEDIATELY after ticket creation
                     # This must happen before processing next email to prevent duplicates
-                    email_log = EmailProcessedLog(
-                        email_id=email_id,
-                        conversation_id=conversation_id,
-                        ticket_id=ticket.id,
-                        sender_email=sender_email,
-                        user_id=user_id,
-                        email_subject=subject,
-                        is_followup=False
-                    )
-                    db.session.add(email_log)
+                    placeholder_log.ticket_id = ticket.id
+                    placeholder_log.user_id = user_id
                     db.session.commit()
                     
-                    print(f"✅ Logged email {email_id} → ticket #{ticket.id} for conversation {conversation_id}")
+                    print(f"✅ Updated email log {email_id} → ticket #{ticket.id} for conversation {conversation_id}")
                     
                     tickets_created += 1
                     processed_count += 1
@@ -2024,6 +2019,19 @@ def _process_emails_internal():
             except Exception as e:
                 print(f"❌ Error processing email {email.get('id', 'unknown')}: {e}")
                 db.session.rollback()
+                # Try to clean up placeholder_log if it exists
+                try:
+                    if 'placeholder_log' in locals() and placeholder_log:
+                        # Check if placeholder_log still exists (might have been committed)
+                        existing_placeholder = EmailProcessedLog.query.filter_by(email_id=email.get("id")).first()
+                        if existing_placeholder and not existing_placeholder.ticket_id:
+                            # Only delete if no ticket was created
+                            db.session.delete(existing_placeholder)
+                            db.session.commit()
+                            print(f"🧹 Cleaned up placeholder log for failed email {email.get('id')}")
+                except Exception as cleanup_error:
+                    print(f"⚠️ Error cleaning up placeholder log: {cleanup_error}")
+                    db.session.rollback()
                 continue
         
         return {
@@ -2400,13 +2408,15 @@ def reprocess_email(email_id):
                     body_preview = email.get("bodyPreview", "")
                     
                     # Get raw email content for comments (preserve everything)
-                    raw_email_content = body_preview if body_preview else (raw_body or "")
+                    # PRIORITIZE raw_body (full content) over body_preview (truncated preview)
                     if content_type and content_type.lower() == "html" and raw_body:
                         from html import unescape
                         import re
                         text_content = re.sub(r'<[^>]+>', ' ', raw_body)
                         text_content = unescape(text_content)
-                        raw_email_content = body_preview if body_preview else text_content
+                        raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
+                    else:
+                        raw_email_content = (raw_body or body_preview or "").strip()
                     
                     comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
                     
@@ -2450,13 +2460,15 @@ def reprocess_email(email_id):
         body_preview = email.get("bodyPreview", "")
         
         # Get raw email content for comments (preserve everything)
-        raw_email_content = body_preview if body_preview else (raw_body or "")
+        # PRIORITIZE raw_body (full content) over body_preview (truncated preview)
         if content_type and content_type.lower() == "html" and raw_body:
             from html import unescape
             import re
             text_content = re.sub(r'<[^>]+>', ' ', raw_body)
             text_content = unescape(text_content)
-            raw_email_content = body_preview if body_preview else text_content
+            raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
+        else:
+            raw_email_content = (raw_body or body_preview or "").strip()
         
         if content_type and content_type.lower() == "html":
             initial_content = extract_main_content_from_html(raw_body or "", body_preview)
