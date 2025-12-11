@@ -267,3 +267,20 @@ class EmailProcessedLog(db.Model):
 
     def __repr__(self):
         return f"<EmailProcessedLog email_id={self.email_id} ticket_id={self.ticket_id} conversation_id={self.conversation_id}>"
+
+
+class TicketAssignLocation(db.Model):
+    """
+    Stores location assignments for tickets.
+    A ticket can be assigned to multiple locations.
+    """
+    __tablename__ = "ticket_assign_locations"
+
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_id = db.Column(db.Integer, nullable=False, index=True)
+    location_id = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.Integer, nullable=True)  # User who assigned the location
+
+    def __repr__(self):
+        return f"<TicketAssignLocation ticket_id={self.ticket_id} location_id={self.location_id}>"

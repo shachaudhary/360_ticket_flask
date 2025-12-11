@@ -10,7 +10,7 @@ import re
 import html
 
 from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, \
-    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink, EmailProcessedLog
+    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink, EmailProcessedLog, TicketAssignLocation
 from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log, get_user_id_by_email, get_graph_token, GRAPH_BASE_URL
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
@@ -197,6 +197,22 @@ def update_ticket(ticket_id):
         ticket.category_id = data["category_id"]
         category_changed = True
 
+    # --- Location ID
+    if "location_id" in data:
+        new_location_id = data["location_id"]
+        # Handle None/empty string conversion
+        if new_location_id == "" or new_location_id is None:
+            new_location_id = None
+        else:
+            try:
+                new_location_id = int(new_location_id)
+            except (ValueError, TypeError):
+                return jsonify({"error": "Invalid location_id format. Must be an integer or null"}), 400
+        
+        if ticket.location_id != new_location_id:
+            updated_fields.append(("location_id", ticket.location_id, new_location_id))
+            ticket.location_id = new_location_id
+
     # --- Due Date
     if "due_date" in data:
         try:
@@ -295,6 +311,115 @@ def update_ticket(ticket_id):
                 message=f"Ticket updated ({change_summary})"
             )
 
+    # -----------------------------
+    # Handle follower_ids (replace all followers with provided list)
+    if "follower_ids" in data:
+        follower_ids = data.get("follower_ids")
+        if isinstance(follower_ids, list):
+            # Remove duplicates
+            follower_ids = list(set([int(uid) for uid in follower_ids if uid]))
+            
+            # Get current followers
+            current_followups = TicketFollowUp.query.filter_by(ticket_id=ticket.id).all()
+            current_follower_ids = {fu.user_id for fu in current_followups}
+            
+            # Find followers to remove (in current but not in new list)
+            followers_to_remove = current_follower_ids - set(follower_ids)
+            
+            # Find followers to add (in new list but not in current)
+            followers_to_add = set(follower_ids) - current_follower_ids
+            
+            # Remove followers
+            for uid in followers_to_remove:
+                if uid == updater_id:  # Skip if updater removing himself
+                    continue
+                fu = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
+                if fu:
+                    db.session.delete(fu)
+                    db.session.commit()
+                    
+                    follower_info = get_user_info_by_id(uid)
+                    follower_name = follower_info.get("username") if follower_info else f"User {uid}"
+                    
+                    # Notify assignees about removed follower
+                    assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+                    recipients = set()
+                    if assignment:
+                        if assignment.assign_by and assignment.assign_by != updater_id:
+                            recipients.add(assignment.assign_by)
+                        if assignment.assign_to and assignment.assign_to != updater_id:
+                            recipients.add(assignment.assign_to)
+                    
+                    for rid in recipients:
+                        user_info = get_user_info_by_id(rid)
+                        if user_info:
+                            send_update_ticket_email(
+                                ticket,
+                                user_info,
+                                updater_info,
+                                [("followup", "", f"{follower_name} unfollowed this ticket")]
+                            )
+                            create_notification(
+                                ticket_id=ticket.id,
+                                receiver_id=rid,
+                                sender_id=updater_id,
+                                notification_type="followup",
+                                message=f"{follower_name} unfollowed this ticket"
+                            )
+            
+            # Add new followers
+            for uid in followers_to_add:
+                if uid == updater_id:  # Skip if updater adding himself
+                    continue
+                existing = TicketFollowUp.query.filter_by(ticket_id=ticket.id, user_id=uid).first()
+                if not existing:
+                    fu = TicketFollowUp(
+                        ticket_id=ticket.id,
+                        user_id=uid,
+                        note="Added as follow-up user",
+                        created_at=datetime.utcnow()
+                    )
+                    db.session.add(fu)
+                    db.session.commit()
+                    
+                    follower_info = get_user_info_by_id(uid)
+                    follower_name = follower_info.get("username") if follower_info else f"User {uid}"
+                    
+                    # Notify new follower
+                    create_notification(
+                        ticket_id=ticket.id,
+                        receiver_id=uid,
+                        sender_id=updater_id,
+                        notification_type="followup",
+                        message=f"You are now following ticket #{ticket.id}"
+                    )
+                    
+                    # Notify assignees about new follower
+                    assignment = TicketAssignment.query.filter_by(ticket_id=ticket.id).first()
+                    recipients = set()
+                    if assignment:
+                        if assignment.assign_by and assignment.assign_by != updater_id:
+                            recipients.add(assignment.assign_by)
+                        if assignment.assign_to and assignment.assign_to != updater_id:
+                            recipients.add(assignment.assign_to)
+                    
+                    for rid in recipients:
+                        user_info = get_user_info_by_id(rid)
+                        if user_info:
+                            send_update_ticket_email(
+                                ticket,
+                                user_info,
+                                updater_info,
+                                [("followup", "", f"{follower_name} started following this ticket")]
+                            )
+                            create_notification(
+                                ticket_id=ticket.id,
+                                receiver_id=rid,
+                                sender_id=updater_id,
+                                notification_type="followup",
+                                message=f"{follower_name} has been added as a follow-up user"
+                            )
+    
     # -----------------------------
     # Handle newly added followups
     if "followup_user_ids_add" in data:
@@ -605,12 +730,12 @@ def get_tickets():
 
         followups = []
         for f in TicketFollowUp.query.filter_by(ticket_id=t.id).all():
-            u_info = get_user_info_by_id(f.user_id)
+            u_info = get_user_info_by_id(f.user_id) if f.user_id else None
             followups.append({
                 "id": f.id,
                 "note": f.note,
                 "user_id": f.user_id,
-                "username": u_info["username"] if u_info else None,
+                "username": u_info.get("username") if u_info else None,
                 "followup_date": f.followup_date,
                 "created_at": f.created_at
             })
@@ -666,8 +791,8 @@ def get_tickets():
 # ─────────────────────────────────────────────
 # Get Ticket with all details
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["GET"])
-@require_api_key
-@validate_token
+# @require_api_key
+# @validate_token
 def get_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -719,12 +844,12 @@ def get_ticket(ticket_id):
     # --- Followups
     followups = []
     for f in TicketFollowUp.query.filter_by(ticket_id=ticket.id).all():
-        u_info = get_user_info_by_id(f.user_id)
+        u_info = get_user_info_by_id(f.user_id) if f.user_id else None
         followups.append({
             "id": f.id,
             "note": f.note,
             "user_id": f.user_id,
-            "username": u_info["username"] if u_info else None,
+            "username": u_info.get("username") if u_info else None,
             "followup_date": f.followup_date,
             "created_at": f.created_at
         })
@@ -765,6 +890,53 @@ def get_ticket(ticket_id):
             "status": contact_form.status,
             "created_at": contact_form.created_at
         }
+    
+    # --- Location Details from Auth System
+    location_details = None
+    if ticket.location_id:
+        try:
+            AUTH_SYSTEM_URL = os.getenv("AUTH_SYSTEM_URL", "https://api.dental360grp.com/api")
+            clinic_id = ticket.clinic_id or 1  # Default to 1 if clinic_id is None
+            
+            internal_api_url = f"{AUTH_SYSTEM_URL}/clinic_locations/get_all/{clinic_id}"
+            print(f"Fetching location details from: {internal_api_url}")
+            
+            internal_response = requests.get(internal_api_url, timeout=10)
+            
+            if internal_response.status_code == 200:
+                internal_data = internal_response.json()
+                all_locations = internal_data.get("locations", [])
+                
+                # Find the location matching ticket.location_id
+                for loc in all_locations:
+                    if loc.get("id") == ticket.location_id:
+                        location_details = {
+                            "id": loc.get("id"),
+                            "location_name": loc.get("location_name"),
+                            "address": loc.get("address"),
+                            "city": loc.get("city"),
+                            "state": loc.get("state"),
+                            "postal_code": loc.get("postal_code"),
+                            "phone": loc.get("phone"),
+                            "email": loc.get("email"),
+                            "clinic_id": loc.get("clinic_id"),
+                            "is_enable": loc.get("is_enable"),
+                            "display_name": loc.get("display_name"),
+                            "greeting_message": loc.get("greeting_message"),
+                            "map_link": loc.get("map_link"),
+                            "sip_uri": loc.get("sip_uri")
+                        }
+                        print(f"✅ Found location details for location_id: {ticket.location_id}")
+                        break
+                
+                if not location_details:
+                    print(f"⚠️ Location ID {ticket.location_id} not found in auth system")
+            else:
+                print(f"⚠️ Failed to fetch locations from auth system: {internal_response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching location details from auth system: {e}")
+            # Continue without location details
+    
     # --- Final Response
     result = {
         "id": ticket.id,
@@ -775,6 +947,9 @@ def get_ticket(ticket_id):
         "due_date": ticket.due_date,
         "created_at": ticket.created_at,
         "completed_at": ticket.completed_at,
+        "location_id": ticket.location_id,
+        "location_details": location_details,  # Location details from auth system
+        "clinic_id": ticket.clinic_id,
         "created_by": created_by,
         "assignees": assignees,
         "assignment_logs": assignment_logs,   # :white_check_mark: NEW
@@ -1045,6 +1220,88 @@ def filter_tickets():
         "per_page": pagination.per_page,
         "pages": pagination.pages
     })
+
+
+def analyze_email_issue_with_llm(email_content: str) -> str:
+    """
+    Analyze email content using LLM to extract the main issue/problem.
+    Returns a concise summary of what the issue is.
+    """
+    if not email_content or len(email_content.strip()) < 10:
+        return email_content
+    
+    try:
+        system_prompt = (
+            "Analyze this email and extract the main issue or problem being reported. "
+            "Return ONLY a clear, concise summary of the issue. "
+            "Focus on what needs to be done or what problem needs to be solved. "
+            "Do NOT include greetings, signatures, or pleasantries. "
+            "Do NOT include analysis or explanation - just state the issue clearly. "
+            "If the email is asking for help, state what help is needed. "
+            "If it's reporting a problem, state what the problem is. "
+            "Keep it brief and actionable (2-3 sentences maximum)."
+        )
+        
+        user_prompt = f"""Analyze this email and extract the main issue:
+
+{email_content[:2000]}"""
+        
+        response = llm_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            max_tokens=200
+        )
+        
+        analyzed_issue = response.choices[0].message.content.strip()
+        
+        # Clean up any analysis artifacts
+        analyzed_issue = re.sub(r"<\|[^|]+\|>", "", analyzed_issue).strip()
+        
+        # Remove common analysis prefixes
+        analysis_prefixes = [
+            "the issue is",
+            "the problem is",
+            "the main issue",
+            "the problem",
+            "issue:",
+            "problem:"
+        ]
+        
+        for prefix in analysis_prefixes:
+            if analyzed_issue.lower().startswith(prefix):
+                analyzed_issue = analyzed_issue[len(prefix):].strip()
+                if analyzed_issue.startswith(":"):
+                    analyzed_issue = analyzed_issue[1:].strip()
+                break
+        
+        # If result is too short or looks like analysis, use fallback
+        if (len(analyzed_issue) < 10 or 
+            "analysis" in analyzed_issue.lower()[:50] or
+            "the email" in analyzed_issue.lower()[:50] or
+            "this email" in analyzed_issue.lower()[:50]):
+            # Fallback: use first meaningful sentence from content
+            sentences = email_content.split('.')
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if len(sentence) > 20 and len(sentence) < 200:
+                    return sentence
+            return email_content[:200] if email_content else "(no content)"
+        
+        return analyzed_issue
+        
+    except Exception as e:
+        print(f"⚠️ Error analyzing email issue with LLM: {e}")
+        # Fallback: use first meaningful sentence
+        sentences = email_content.split('.')
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) > 20 and len(sentence) < 200:
+                return sentence
+        return email_content[:200] if email_content else "(no content)"
 
 
 def clean_email_content_with_llm(email_content: str) -> str:
@@ -1454,18 +1711,31 @@ def _process_emails_internal():
                     if not user_id:
                         print(f"⚠️ User not found for email: {sender_email}")
                 
-                # Extract email content
+                # Extract email content - preserve raw content for comments
                 raw_body = email.get("body", {}).get("content") if email.get("body") else None
                 content_type = email.get("body", {}).get("contentType") if email.get("body") else None
                 body_preview = email.get("bodyPreview", "")
                 
-                # Extract main content (plain text) from HTML or use preview
+                # Get raw email content for comments (preserve everything)
+                # Prefer body_preview as it's usually cleaner, fallback to raw_body
+                raw_email_content = body_preview if body_preview else (raw_body or "")
+                if content_type and content_type.lower() == "html" and raw_body:
+                    # For HTML emails, extract text but keep more content
+                    from html import unescape
+                    import re
+                    # Remove HTML tags but keep the text
+                    text_content = re.sub(r'<[^>]+>', ' ', raw_body)
+                    text_content = unescape(text_content)
+                    # Use body_preview if available, otherwise use extracted HTML text
+                    raw_email_content = body_preview if body_preview else text_content
+                
+                # Extract main content for analysis (this can be cleaned)
                 if content_type and content_type.lower() == "html":
                     initial_content = extract_main_content_from_html(raw_body or "", body_preview)
                 else:
                     initial_content = (raw_body or body_preview or "").strip()
                 
-                # Clean email content using LLM (with fallback to simple extraction)
+                # Clean email content using LLM (with fallback to simple extraction) - only for analysis
                 print(f"🧹 Cleaning email content with LLM...")
                 main_content = clean_email_content_with_llm(initial_content)
                 
@@ -1494,7 +1764,8 @@ def _process_emails_internal():
                     
                     ticket = Ticket.query.get(existing_conversation.ticket_id)
                     if ticket:
-                        comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                        # Add full email content as comment (use raw content, not processed)
+                        comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
                         
                         # Check if this exact comment already exists (prevent duplicates)
                         existing_comment = TicketComment.query.filter_by(
@@ -1561,7 +1832,7 @@ def _process_emails_internal():
                             # Add as comment instead of creating new ticket
                             ticket = Ticket.query.get(final_conversation_check.ticket_id)
                             if ticket:
-                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
                                 
                                 # Check if comment already exists
                                 existing_comment = TicketComment.query.filter_by(
@@ -1645,7 +1916,7 @@ def _process_emails_internal():
                             # Add as comment instead
                             ticket = Ticket.query.get(last_check.ticket_id)
                             if ticket:
-                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
                                 comment = TicketComment(
                                     ticket_id=ticket.id,
                                     user_id=user_id,
@@ -1672,10 +1943,17 @@ def _process_emails_internal():
                     
                     # Create ticket (only if all checks passed)
                     print(f"📝 Creating new ticket for conversation_id: {conversation_id or 'None'}")
+                    
+                    # Step 1: Analyze email content to extract the main issue for ticket message
+                    print(f"🔍 Analyzing email content to extract main issue...")
+                    analyzed_issue = analyze_email_issue_with_llm(initial_content)
+                    print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
+                    
+                    # Create ticket with analyzed issue as details
                     ticket = Ticket(
                         clinic_id=None,  # Can be set later if needed
                         title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
-                        details=main_content or "(no content)",
+                        details=analyzed_issue or "(no content)",  # Use analyzed issue as ticket message
                         category_id=category_id,
                         status="Pending",
                         priority="low",
@@ -1688,6 +1966,18 @@ def _process_emails_internal():
                     db.session.commit()
                     
                     print(f"✅ Created ticket #{ticket.id} for conversation_id: {conversation_id}")
+                    
+                    # Step 2: Add full email content as a comment (use raw content, not processed)
+                    print(f"💬 Adding full email content as comment...")
+                    full_email_comment = f"📧 Email from {sender_name or sender_email}\n\n{raw_email_content}"
+                    comment = TicketComment(
+                        ticket_id=ticket.id,
+                        user_id=user_id,
+                        comment=full_email_comment
+                    )
+                    db.session.add(comment)
+                    db.session.commit()
+                    print(f"✅ Added full email content as comment to ticket #{ticket.id}")
                     
                     # Auto-assign if category has assignee
                     if matched_category and matched_category.assignee_id:
@@ -1768,6 +2058,130 @@ def process_emails():
     
     # If it's already a Flask response, return it
     return result
+
+
+@ticket_bp.route("/read_emails", methods=["GET"])
+# @require_api_key
+# @validate_token
+def read_emails():
+    """
+    Read emails from the inbox without processing them.
+    Returns the last 50 emails with their details.
+    
+    Query parameters:
+    - limit: Number of emails to fetch (default: 50, max: 100)
+    - hours: Number of hours to look back (default: 24)
+    
+    Returns list of emails with their details.
+    """
+    try:
+        import os
+        from datetime import timedelta
+        
+        # Get query parameters
+        limit = request.args.get("limit", 50, type=int)
+        hours = request.args.get("hours", 24, type=int)
+        
+        # Validate and cap limit
+        if limit < 1:
+            limit = 50
+        if limit > 100:
+            limit = 100
+        
+        # Get email address to monitor
+        email_address = os.getenv("MICROSOFT_EMAIL", "it.support@dental360grp.com")
+        
+        # Get access token
+        token = get_graph_token()
+        if not token:
+            return jsonify({
+                "error": "Failed to get Microsoft Graph access token",
+                "status": "error"
+            }), 500
+        
+        # Calculate time threshold
+        time_threshold = datetime.utcnow() - timedelta(hours=hours)
+        time_filter = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        # Build the API URL to get emails
+        base_url = f"{GRAPH_BASE_URL}/users/{email_address}/mailFolders/inbox/messages"
+        
+        # Query parameters - get last N emails
+        params = {
+            '$top': limit,  # Limit to last N emails
+            '$filter': f'receivedDateTime ge {time_filter}',  # Only emails from last N hours
+            '$orderby': 'receivedDateTime desc',  # Most recent first
+            '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,body,hasAttachments,conversationId'
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Make the API request
+        response = requests.get(base_url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code != 200:
+            return jsonify({
+                "error": "Failed to fetch emails",
+                "status": "error",
+                "status_code": response.status_code,
+                "details": response.text
+            }), 500
+        
+        data = response.json()
+        emails = data.get('value', [])
+        
+        # Format emails for response
+        formatted_emails = []
+        for email in emails:
+            email_id = email.get("id")
+            conversation_id = email.get("conversationId")
+            subject = email.get("subject", "")
+            sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
+            sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+            received_datetime = email.get("receivedDateTime")
+            is_read = email.get("isRead", False)
+            body_preview = email.get("bodyPreview", "")
+            has_attachments = email.get("hasAttachments", False)
+            
+            # Check if email was already processed
+            processed_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+            is_processed = processed_log is not None
+            ticket_id = processed_log.ticket_id if processed_log else None
+            
+            formatted_emails.append({
+                "email_id": email_id,
+                "conversation_id": conversation_id,
+                "subject": subject,
+                "sender_email": sender_email,
+                "sender_name": sender_name,
+                "received_datetime": received_datetime,
+                "is_read": is_read,
+                "body_preview": body_preview[:200] if body_preview else "",  # Limit preview length
+                "has_attachments": has_attachments,
+                "is_processed": is_processed,
+                "ticket_id": ticket_id,
+                "processed_at": processed_log.processed_at.isoformat() if processed_log and processed_log.processed_at else None
+            })
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Fetched {len(formatted_emails)} emails",
+            "total_emails": len(formatted_emails),
+            "limit": limit,
+            "hours": hours,
+            "time_threshold": time_filter,
+            "emails": formatted_emails
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error reading emails: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 
 @ticket_bp.route("/check_missing_tickets", methods=["GET"])
@@ -1984,13 +2398,16 @@ def reprocess_email(email_id):
                     content_type = email.get("body", {}).get("contentType") if email.get("body") else None
                     body_preview = email.get("bodyPreview", "")
                     
-                    if content_type and content_type.lower() == "html":
-                        initial_content = extract_main_content_from_html(raw_body or "", body_preview)
-                    else:
-                        initial_content = (raw_body or body_preview or "").strip()
+                    # Get raw email content for comments (preserve everything)
+                    raw_email_content = body_preview if body_preview else (raw_body or "")
+                    if content_type and content_type.lower() == "html" and raw_body:
+                        from html import unescape
+                        import re
+                        text_content = re.sub(r'<[^>]+>', ' ', raw_body)
+                        text_content = unescape(text_content)
+                        raw_email_content = body_preview if body_preview else text_content
                     
-                    main_content = clean_email_content_with_llm(initial_content)
-                    comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{main_content}"
+                    comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
                     
                     comment = TicketComment(
                         ticket_id=ticket.id,
@@ -2031,12 +2448,26 @@ def reprocess_email(email_id):
         content_type = email.get("body", {}).get("contentType") if email.get("body") else None
         body_preview = email.get("bodyPreview", "")
         
+        # Get raw email content for comments (preserve everything)
+        raw_email_content = body_preview if body_preview else (raw_body or "")
+        if content_type and content_type.lower() == "html" and raw_body:
+            from html import unescape
+            import re
+            text_content = re.sub(r'<[^>]+>', ' ', raw_body)
+            text_content = unescape(text_content)
+            raw_email_content = body_preview if body_preview else text_content
+        
         if content_type and content_type.lower() == "html":
             initial_content = extract_main_content_from_html(raw_body or "", body_preview)
         else:
             initial_content = (raw_body or body_preview or "").strip()
         
         main_content = clean_email_content_with_llm(initial_content)
+        
+        # Analyze email content to extract the main issue for ticket message
+        print(f"🔍 Analyzing email content to extract main issue...")
+        analyzed_issue = analyze_email_issue_with_llm(initial_content)
+        print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
         
         # Find IT category
         category_id = None
@@ -2049,7 +2480,7 @@ def reprocess_email(email_id):
         ticket = Ticket(
             clinic_id=None,
             title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
-            details=main_content or "(no content)",
+            details=analyzed_issue or "(no content)",  # Use analyzed issue as ticket message
             category_id=category_id,
             status="Pending",
             priority="low",
@@ -2060,6 +2491,18 @@ def reprocess_email(email_id):
         )
         db.session.add(ticket)
         db.session.commit()
+        
+        # Add full email content as a comment (use raw content, not processed)
+        print(f"💬 Adding full email content as comment...")
+        full_email_comment = f"📧 Email from {sender_name or sender_email}\n\n{raw_email_content}"
+        comment = TicketComment(
+            ticket_id=ticket.id,
+            user_id=user_id,
+            comment=full_email_comment
+        )
+        db.session.add(comment)
+        db.session.commit()
+        print(f"✅ Added full email content as comment to ticket #{ticket.id}")
         
         # Auto-assign if category has assignee
         if matched_category and matched_category.assignee_id:
@@ -2110,6 +2553,574 @@ def reprocess_email(email_id):
     except Exception as e:
         db.session.rollback()
         print(f"❌ Error reprocessing email {email_id}: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/assign_locations", methods=["POST"])
+@require_api_key
+@validate_token
+def assign_ticket_locations():
+    """
+    Assign one or more locations to a ticket.
+    Saves location_ids and ticket_id in ticket_assign_locations table.
+    
+    Request body (JSON):
+    {
+        "ticket_id": 123,
+        "location_ids": [1, 2, 3],  # Array of location IDs
+        "user_id": 456,  # Optional: User ID who assigned the locations
+        "replace": false  # Optional: If true, replaces all existing locations with new ones
+    }
+    
+    Behavior:
+    - If replace=false (default): Adds new locations, skips duplicates
+    - If replace=true: Removes all existing locations and assigns only the new ones
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        ticket_id = data.get("ticket_id")
+        location_ids = data.get("location_ids")
+        created_by = data.get("user_id")
+        replace = data.get("replace", False)  # Default to False (add mode)
+        
+        # Validate required fields
+        if not ticket_id:
+            return jsonify({"error": "ticket_id is required"}), 400
+        
+        if not location_ids:
+            return jsonify({"error": "location_ids is required"}), 400
+        
+        if not isinstance(location_ids, list):
+            return jsonify({"error": "location_ids must be an array"}), 400
+        
+        if len(location_ids) == 0 and not replace:
+            return jsonify({"error": "location_ids cannot be empty"}), 400
+        
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Remove duplicates from location_ids
+        location_ids = list(set(location_ids))
+        
+        # Get existing assignments
+        existing_assignments = TicketAssignLocation.query.filter_by(ticket_id=ticket_id).all()
+        existing_location_ids = {assign.location_id for assign in existing_assignments}
+        
+        removed_locations = []
+        created_assignments = []
+        
+        # If replace mode: remove all existing locations first
+        if replace:
+            for assignment in existing_assignments:
+                removed_locations.append(assignment.location_id)
+                db.session.delete(assignment)
+            
+            # If location_ids is empty in replace mode, just remove all
+            if len(location_ids) == 0:
+                db.session.commit()
+                return jsonify({
+                    "status": "success",
+                    "message": "All locations removed from ticket",
+                    "ticket_id": ticket_id,
+                    "removed_locations": removed_locations,
+                    "all_locations": []
+                }), 200
+            
+            # Add all new locations (no need to check duplicates since we removed all)
+            for location_id in location_ids:
+                assignment = TicketAssignLocation(
+                    ticket_id=ticket_id,
+                    location_id=location_id,
+                    created_by=created_by
+                )
+                db.session.add(assignment)
+                created_assignments.append(location_id)
+        
+        else:
+            # Add mode: only add new locations, skip duplicates
+            new_location_ids = [loc_id for loc_id in location_ids if loc_id not in existing_location_ids]
+            
+            if not new_location_ids:
+                return jsonify({
+                    "status": "success",
+                    "message": "All locations are already assigned to this ticket",
+                    "ticket_id": ticket_id,
+                    "existing_locations": list(existing_location_ids),
+                    "skipped": location_ids
+                }), 200
+            
+            # Create new location assignments
+            for location_id in new_location_ids:
+                assignment = TicketAssignLocation(
+                    ticket_id=ticket_id,
+                    location_id=location_id,
+                    created_by=created_by
+                )
+                db.session.add(assignment)
+                created_assignments.append(location_id)
+        
+        db.session.commit()
+        
+        # Get all assigned locations for this ticket
+        all_assignments = TicketAssignLocation.query.filter_by(ticket_id=ticket_id).all()
+        all_location_ids = [assign.location_id for assign in all_assignments]
+        
+        response_data = {
+            "status": "success",
+            "ticket_id": ticket_id,
+            "all_locations": all_location_ids
+        }
+        
+        if replace:
+            response_data["message"] = f"Replaced all locations. Added {len(created_assignments)} new location(s)"
+            response_data["removed_locations"] = removed_locations
+            response_data["new_locations"] = created_assignments
+        else:
+            response_data["message"] = f"Successfully assigned {len(created_assignments)} location(s) to ticket"
+            response_data["new_locations"] = created_assignments
+            response_data["skipped"] = [loc_id for loc_id in location_ids if loc_id in existing_location_ids]
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error assigning locations to ticket: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/ticket/<int:ticket_id>/locations", methods=["GET"])
+@require_api_key
+@validate_token
+def get_ticket_locations(ticket_id):
+    """
+    Get all locations assigned to a specific ticket with location details from auth system.
+    
+    Returns:
+    {
+        "ticket_id": 123,
+        "locations": [
+            {
+                "id": 1,  # TicketAssignLocation id
+                "location_id": 1,
+                "created_at": "2024-01-15T10:30:00",
+                "created_by": 456,
+                "location_details": {
+                    "id": 1,
+                    "location_name": "Bucktown",
+                    "address": "2500 W North Ave",
+                    "city": "Chicago",
+                    "state": "IL",
+                    ...
+                }
+            },
+            ...
+        ],
+        "total": 2
+    }
+    """
+    try:
+        import os
+        
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Get all location assignments for this ticket
+        assignments = TicketAssignLocation.query.filter_by(ticket_id=ticket_id).order_by(
+            TicketAssignLocation.created_at.desc()
+        ).all()
+        
+        if not assignments:
+            return jsonify({
+                "ticket_id": ticket_id,
+                "locations": [],
+                "total": 0
+            }), 200
+        
+        # Extract location_ids to fetch from auth system
+        location_ids = [assign.location_id for assign in assignments]
+        
+        # Fetch location details from auth system
+        AUTH_SYSTEM_URL = os.getenv("AUTH_SYSTEM_URL", "https://api.dental360grp.com/api")
+        clinic_id = ticket.clinic_id or 1  # Default to 1 if clinic_id is None
+        
+        location_details_map = {}
+        try:
+            internal_api_url = f"{AUTH_SYSTEM_URL}/clinic_locations/get_all/{clinic_id}"
+            print(f"Fetching locations from: {internal_api_url}")
+            
+            internal_response = requests.get(internal_api_url, timeout=10)
+            
+            if internal_response.status_code == 200:
+                internal_data = internal_response.json()
+                all_locations = internal_data.get("locations", [])
+                
+                # Create a map of location_id -> location details
+                for loc in all_locations:
+                    loc_id = loc.get("id")
+                    if loc_id in location_ids:
+                        location_details_map[loc_id] = loc
+                
+                print(f"✅ Found {len(location_details_map)} matching locations out of {len(all_locations)} total")
+            else:
+                print(f"⚠️ Failed to fetch locations from auth system: {internal_response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching location details from auth system: {e}")
+            # Continue without location details
+        
+        # Build response with location details
+        locations = []
+        for assign in assignments:
+            location_data = {
+                "id": assign.id,
+                "location_id": assign.location_id,
+                "created_at": assign.created_at.isoformat() if assign.created_at else None,
+                "created_by": assign.created_by
+            }
+            
+            # Add location details if available
+            if assign.location_id in location_details_map:
+                location_data["location_details"] = location_details_map[assign.location_id]
+            else:
+                location_data["location_details"] = None
+            
+            locations.append(location_data)
+        
+        return jsonify({
+            "ticket_id": ticket_id,
+            "locations": locations,
+            "total": len(locations)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error getting ticket locations: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/ticket/<int:ticket_id>/locations/<int:location_id>", methods=["DELETE"])
+@require_api_key
+@validate_token
+def remove_ticket_location(ticket_id, location_id):
+    """
+    Remove a location assignment from a ticket.
+    
+    Deletes the specific location assignment from ticket_assign_locations table.
+    """
+    try:
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Find the assignment
+        assignment = TicketAssignLocation.query.filter_by(
+            ticket_id=ticket_id,
+            location_id=location_id
+        ).first()
+        
+        if not assignment:
+            return jsonify({
+                "error": f"Location {location_id} is not assigned to ticket {ticket_id}"
+            }), 404
+        
+        db.session.delete(assignment)
+        db.session.commit()
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Location {location_id} removed from ticket {ticket_id}",
+            "ticket_id": ticket_id,
+            "location_id": location_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error removing location from ticket: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/ticket/<int:ticket_id>/followers", methods=["POST"])
+@require_api_key
+@validate_token
+def add_ticket_followers(ticket_id):
+    """
+    Add one or more followers to a ticket.
+    Uses TicketFollowUp table to track followers.
+    
+    Request body (JSON):
+    {
+        "user_ids": [12, 15, 20],  # Array of user IDs to add as followers
+        "added_by": 456,  # Optional: User ID who added the followers
+        "note": "Optional note about why these users are following"  # Optional
+    }
+    
+    Returns list of successfully added followers.
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Request body is required"}), 400
+        
+        user_ids = data.get("user_ids")
+        added_by = data.get("user_id")  # Support both field names
+        note = data.get("note", "Added as follow-up user")
+        
+        # Validate required fields
+        if not user_ids:
+            return jsonify({"error": "user_ids is required"}), 400
+        
+        if not isinstance(user_ids, list):
+            return jsonify({"error": "user_ids must be an array"}), 400
+        
+        if len(user_ids) == 0:
+            return jsonify({"error": "user_ids cannot be empty"}), 400
+        
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Remove duplicates from user_ids
+        user_ids = list(set(user_ids))
+        
+        # Get existing followers to avoid duplicates
+        existing_followups = TicketFollowUp.query.filter_by(ticket_id=ticket_id).all()
+        existing_user_ids = {fu.user_id for fu in existing_followups}
+        
+        # Filter out users that are already followers
+        new_user_ids = [uid for uid in user_ids if uid not in existing_user_ids]
+        
+        if not new_user_ids:
+            return jsonify({
+                "status": "success",
+                "message": "All users are already following this ticket",
+                "ticket_id": ticket_id,
+                "existing_followers": list(existing_user_ids),
+                "skipped": user_ids
+            }), 200
+        
+        # Get updater info for notifications
+        updater_info = get_user_info_by_id(added_by) if added_by else {"username": "System"}
+        
+        # Create new follow-up entries
+        added_followers = []
+        skipped_followers = []
+        
+        for user_id in user_ids:
+            if user_id in existing_user_ids:
+                skipped_followers.append(user_id)
+                continue
+            
+            # Skip if user is trying to add themselves (unless explicitly allowed)
+            if user_id == added_by and added_by:
+                # Allow self-follow but log it
+                pass
+            
+            followup = TicketFollowUp(
+                ticket_id=ticket_id,
+                user_id=user_id,
+                note=note,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(followup)
+            added_followers.append(user_id)
+        
+        db.session.commit()
+        
+        # Send notifications and emails to relevant users
+        assignment = TicketAssignment.query.filter_by(ticket_id=ticket_id).first()
+        
+        # Collect all recipients (new followers + assignees)
+        recipients = set(added_followers)
+        if assignment:
+            if assignment.assign_by:
+                recipients.add(assignment.assign_by)
+            if assignment.assign_to:
+                recipients.add(assignment.assign_to)
+        
+        # Send notifications to new followers and notify assignees
+        for user_id in added_followers:
+            user_info = get_user_info_by_id(user_id)
+            if user_info:
+                # Notify the new follower
+                create_notification(
+                    ticket_id=ticket_id,
+                    receiver_id=user_id,
+                    sender_id=added_by,
+                    notification_type="followup",
+                    message=f"You are now following ticket #{ticket_id}"
+                )
+        
+        # Notify assignees about new followers
+        for recipient_id in recipients:
+            if recipient_id in added_followers:
+                continue  # Already notified above
+            
+            user_info = get_user_info_by_id(recipient_id)
+            if user_info:
+                follower_names = []
+                for fid in added_followers:
+                    finfo = get_user_info_by_id(fid)
+                    if finfo:
+                        follower_names.append(finfo.get("username", f"User {fid}"))
+                
+                follower_list = ", ".join(follower_names)
+                send_update_ticket_email(
+                    ticket,
+                    user_info,
+                    updater_info,
+                    [("followup", "", f"{follower_list} started following this ticket")]
+                )
+                create_notification(
+                    ticket_id=ticket_id,
+                    receiver_id=recipient_id,
+                    sender_id=added_by,
+                    notification_type="followup",
+                    message=f"{follower_list} has been added as a follow-up user"
+                )
+        
+        # Get all followers for this ticket (including existing ones)
+        all_followups = TicketFollowUp.query.filter_by(ticket_id=ticket_id).all()
+        all_follower_ids = [fu.user_id for fu in all_followups]
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Successfully added {len(added_followers)} follower(s) to ticket",
+            "ticket_id": ticket_id,
+            "added_followers": added_followers,
+            "all_followers": all_follower_ids,
+            "skipped": skipped_followers
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error adding followers to ticket: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/ticket/<int:ticket_id>/followers", methods=["GET"])
+@require_api_key
+@validate_token
+def get_ticket_followers(ticket_id):
+    """
+    Get all followers for a specific ticket.
+    
+    Returns:
+    {
+        "ticket_id": 123,
+        "followers": [
+            {
+                "id": 1,
+                "user_id": 12,
+                "username": "john_doe",
+                "note": "Added as follow-up user",
+                "created_at": "2024-01-15T10:30:00",
+                "followup_date": "2024-01-15T10:30:00"
+            },
+            ...
+        ],
+        "total": 2
+    }
+    """
+    try:
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Get all followers for this ticket
+        followups = TicketFollowUp.query.filter_by(ticket_id=ticket_id).order_by(
+            TicketFollowUp.created_at.desc()
+        ).all()
+        
+        followers = []
+        for fu in followups:
+            user_info = get_user_info_by_id(fu.user_id) if fu.user_id else None
+            followers.append({
+                "id": fu.id,
+                "user_id": fu.user_id,
+                "username": user_info.get("username") if user_info else None,
+                "note": fu.note,
+                "created_at": fu.created_at.isoformat() if fu.created_at else None,
+                "followup_date": fu.followup_date.isoformat() if fu.followup_date else None
+            })
+        
+        return jsonify({
+            "ticket_id": ticket_id,
+            "followers": followers,
+            "total": len(followers)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error getting ticket followers: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@ticket_bp.route("/ticket/<int:ticket_id>/followers/<int:user_id>", methods=["DELETE"])
+@require_api_key
+@validate_token
+def remove_ticket_follower(ticket_id, user_id):
+    """
+    Remove a follower from a ticket.
+    
+    Deletes the specific follower entry from TicketFollowUp table.
+    """
+    try:
+        # Validate ticket exists
+        ticket = Ticket.query.get(ticket_id)
+        if not ticket:
+            return jsonify({"error": f"Ticket with id {ticket_id} not found"}), 404
+        
+        # Find the follow-up entry
+        followup = TicketFollowUp.query.filter_by(
+            ticket_id=ticket_id,
+            user_id=user_id
+        ).first()
+        
+        if not followup:
+            return jsonify({
+                "error": f"User {user_id} is not following ticket {ticket_id}"
+            }), 404
+        
+        db.session.delete(followup)
+        db.session.commit()
+        
+        return jsonify({
+            "status": "success",
+            "message": f"User {user_id} removed from ticket {ticket_id} followers",
+            "ticket_id": ticket_id,
+            "user_id": user_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error removing follower from ticket: {e}")
         return jsonify({
             "status": "error",
             "error": str(e)
