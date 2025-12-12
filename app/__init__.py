@@ -49,6 +49,7 @@ def create_app(config_path: str | None = None):
     from app.form_entries import form_entries_blueprint
     from app.google_review_routes import google_review_routes
     from app.mailgun_routes import mailgun_bp
+    from app.project_routes import project_bp
 
     app.register_blueprint(ticket_bp, url_prefix="/api")
     app.register_blueprint(category_bp, url_prefix="/api")
@@ -58,46 +59,47 @@ def create_app(config_path: str | None = None):
     app.register_blueprint(form_entries_blueprint, url_prefix="/api")
     app.register_blueprint(google_review_routes, url_prefix="/api")
     app.register_blueprint(mailgun_bp, url_prefix="/api")
+    app.register_blueprint(project_bp, url_prefix="/api")
 
     # 5) health route
     @app.route("/")
     def health():
         return jsonify(status="ok"), 200
 
-    # 6) Setup scheduled tasks (cron jobs)
-    def setup_scheduler(app):
-        """Setup background scheduler for periodic tasks"""
-        from app.ticket_routes import _process_emails_internal
+    # # 6) Setup scheduled tasks (cron jobs)
+    # def setup_scheduler(app):
+    #     """Setup background scheduler for periodic tasks"""
+    #     from app.ticket_routes import _process_emails_internal
         
-        def run_email_processing():
-            """Wrapper to run email processing in app context"""
-            with app.app_context():
-                try:
-                    result = _process_emails_internal()
-                    if result.get("status") == "success":
-                        print(f"✅ Scheduled email processing: {result.get('message')}")
-                    else:
-                        print(f"⚠️ Scheduled email processing: {result.get('error', 'Unknown error')}")
-                except Exception as e:
-                    print(f"❌ Scheduled email processing error: {e}")
+    #     def run_email_processing():
+    #         """Wrapper to run email processing in app context"""
+    #         with app.app_context():
+    #             try:
+    #                 result = _process_emails_internal()
+    #                 if result.get("status") == "success":
+    #                     print(f"✅ Scheduled email processing: {result.get('message')}")
+    #                 else:
+    #                     print(f"⚠️ Scheduled email processing: {result.get('error', 'Unknown error')}")
+    #             except Exception as e:
+    #                 print(f"❌ Scheduled email processing error: {e}")
         
-        # Schedule email processing to run every 10 minutes
-        scheduler.add_job(
-            func=run_email_processing,
-            trigger=CronTrigger(minute='*/10'),  # Every 10 minutes
-            id='process_emails_job',
-            name='Process emails from last 10 minutes',
-            replace_existing=True
-        )
+    #     # Schedule email processing to run every 10 minutes
+    #     scheduler.add_job(
+    #         func=run_email_processing,
+    #         trigger=CronTrigger(minute='*/10'),  # Every 10 minutes
+    #         id='process_emails_job',
+    #         name='Process emails from last 10 minutes',
+    #         replace_existing=True
+    #     )
         
-        # Start scheduler
-        if not scheduler.running:
-            scheduler.start()
-            print("✅ Scheduler started - Email processing will run every 10 minutes")
+    #     # Start scheduler
+    #     if not scheduler.running:
+    #         scheduler.start()
+    #         print("✅ Scheduler started - Email processing will run every 10 minutes")
     
     # Initialize scheduler when app is created
-    with app.app_context():
-        setup_scheduler(app)
+    # with app.app_context():
+    #     setup_scheduler(app)
     
     # Shutdown scheduler when app closes
     import atexit

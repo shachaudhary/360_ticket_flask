@@ -284,3 +284,70 @@ class TicketAssignLocation(db.Model):
 
     def __repr__(self):
         return f"<TicketAssignLocation ticket_id={self.ticket_id} location_id={self.location_id}>"
+
+
+class Project(db.Model):
+    """
+    Project model for managing projects
+    """
+    __tablename__ = "projects"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(50), default="Active")  # Active, Completed, On Hold, Cancelled
+    priority = db.Column(db.String(50), default="Low")  # Low, Medium, High
+    due_date = db.Column(db.Date, nullable=True)
+    color = db.Column(db.String(50), default="#ef4444")  # Project color (hex code)
+    created_by = db.Column(db.Integer, nullable=False)  # User who created the project
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<Project {self.id} - {self.name} ({self.status})>"
+
+
+class ProjectTicket(db.Model):
+    """
+    Junction table linking projects and tickets
+    """
+    __tablename__ = "project_tickets"
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
+    ticket_id = db.Column(db.Integer, db.ForeignKey("tickets.id"), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ProjectTicket project_id={self.project_id} ticket_id={self.ticket_id}>"
+
+
+class ProjectTag(db.Model):
+    """
+    Tags for projects
+    """
+    __tablename__ = "project_tags"
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
+    tag_name = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ProjectTag project_id={self.project_id} tag={self.tag_name}>"
+
+
+class ProjectAssignment(db.Model):
+    """
+    Team member assignments for projects
+    """
+    __tablename__ = "project_assignments"
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, nullable=False)  # Assigned team member
+    assigned_by = db.Column(db.Integer, nullable=True)  # User who assigned
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ProjectAssignment project_id={self.project_id} user_id={self.user_id}>"

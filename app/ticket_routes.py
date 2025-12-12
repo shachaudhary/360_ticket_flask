@@ -10,7 +10,8 @@ import re
 import html
 
 from app.model import Ticket, TicketAssignment, TicketFile, TicketTag, TicketComment, Category, TicketFollowUp, \
-    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink, EmailProcessedLog, TicketAssignLocation
+    TicketStatusLog, TicketAssignmentLog, ContactFormTicketLink, EmailProcessedLog, TicketAssignLocation, \
+    ProjectTicket, Project, ProjectTag, ProjectAssignment
 from app.utils.helper_function import upload_to_s3, send_email, get_user_info_by_id, update_ticket_status, update_ticket_assignment_log, get_user_id_by_email, get_graph_token, GRAPH_BASE_URL
 from app.utils.email_templete import send_tag_email,send_assign_email, send_follow_email, send_update_ticket_email
 from app.notification_route import create_notification
@@ -758,6 +759,20 @@ def get_tickets():
                 "changed_at": log.changed_at
             })
 
+        # ✅ Project Information (if ticket is linked to a project)
+        project_info = None
+        project_ticket = ProjectTicket.query.filter_by(ticket_id=t.id).first()
+        if project_ticket:
+            project = Project.query.get(project_ticket.project_id)
+            if project:
+                project_info = {
+                    "id": project.id,
+                    "name": project.name,
+                    "status": project.status,
+                    "priority": project.priority,
+                    "color": project.color
+                }
+
         result.append({
             "id": t.id,
             "title": t.title,
@@ -774,7 +789,8 @@ def get_tickets():
             "comments": comments,
             "followups": followups,
             "category": category,
-            "status_logs": status_logs
+            "status_logs": status_logs,
+            "project": project_info  # Project information if ticket is linked to a project
         })
 
     return jsonify({
@@ -938,6 +954,26 @@ def get_ticket(ticket_id):
             print(f"⚠️ Error fetching location details from auth system: {e}")
             # Continue without location details
     
+    # --- Project Information (if ticket is linked to a project)
+    project_info = None
+    project_ticket = ProjectTicket.query.filter_by(ticket_id=ticket.id).first()
+    if project_ticket:
+        project = Project.query.get(project_ticket.project_id)
+        if project:
+            created_by_project = get_user_info_by_id(project.created_by) if project.created_by else None
+            project_tags = [tag.tag_name for tag in ProjectTag.query.filter_by(project_id=project.id).all()]
+            project_info = {
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "status": project.status,
+                "priority": project.priority,
+                "color": project.color,
+                "due_date": project.due_date.isoformat() if project.due_date else None,
+                "created_by": created_by_project,
+                "tags": project_tags
+            }
+    
     # --- Final Response
     result = {
         "id": ticket.id,
@@ -960,7 +996,8 @@ def get_ticket(ticket_id):
         "followups": followups,
         "category": category,
         "status_logs": status_logs,
-        "contact_form_info": contact_form_info  # :white_check_mark: Patient contact information from contact form
+        "contact_form_info": contact_form_info,  # :white_check_mark: Patient contact information from contact form
+        "project": project_info  # Project information if ticket is linked to a project
     }
     return jsonify(result)
 

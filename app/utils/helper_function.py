@@ -30,7 +30,7 @@ s3 = boto3.client(
     aws_secret_access_key=AWS_SECRET_KEY,
 )
 
-ALLOWED_EXT = {"png", "jpg", "jpeg", "gif", "pdf", "doc", "docx", "csv", "xls", "xlsx"}
+ALLOWED_EXT = {"png", "jpg", "jpeg", "gif", "pdf", "doc", "docx", "csv", "xls", "xlsx", "webp"}
 
 # ─── Helper: Upload file to S3 ─────────────────────────────
 def upload_to_s3(f, folder="tickets"):
