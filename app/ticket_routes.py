@@ -674,10 +674,17 @@ def get_tickets():
     if end_date:
         query = query.filter(Ticket.created_at <= end_date)
     if search:
-        query = query.filter(or_(
+        # Check if search term is numeric (could be a ticket ID)
+        search_conditions = [
             Ticket.title.ilike(f"%{search}%"),
             Ticket.details.ilike(f"%{search}%")
-        ))
+        ]
+        
+        # If search is numeric, also search by ticket ID
+        if search.isdigit():
+            search_conditions.append(Ticket.id == int(search))
+        
+        query = query.filter(or_(*search_conditions))
 
     if created_by:
         query = query.filter(Ticket.user_id == created_by)

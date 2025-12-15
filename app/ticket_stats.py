@@ -22,123 +22,219 @@ TIMEFRAME_PRESETS = {
 @validate_token
 @require_api_key
 def get_ticket_stats():
-    # 🔹 Query params
-    timeframe = request.args.get("timeframe")
-    clinic_id = request.args.get("clinic_id", type=int)
+    try:
+        # 🔹 Query params
+        timeframe = request.args.get("timeframe")
+        clinic_id = request.args.get("clinic_id", type=int)
 
-    # 🔹 Base query
-    query = Ticket.query
+        # 🔹 Base query
+        query = Ticket.query
 
-    # 🔹 Filter by clinic_id
-    if clinic_id:
-        query = query.filter(Ticket.clinic_id == clinic_id)
+        # 🔹 Filter by clinic_id
+        if clinic_id:
+            query = query.filter(Ticket.clinic_id == clinic_id)
 
-    # 🔹 Filter by timeframe
-    if timeframe in TIMEFRAME_PRESETS:
-        days = TIMEFRAME_PRESETS[timeframe]
-        if timeframe == "today":
-            start_date = date.today()
-            query = query.filter(func.date(Ticket.created_at) == start_date)
-        elif timeframe == "yesterday":
-            yest = date.today() - timedelta(days=1)
-            query = query.filter(func.date(Ticket.created_at) == yest)
-        else:
-            start_date = datetime.utcnow() - timedelta(days=days)
-            query = query.filter(Ticket.created_at >= start_date)
+        # 🔹 Filter by timeframe
+        if timeframe in TIMEFRAME_PRESETS:
+            days = TIMEFRAME_PRESETS[timeframe]
+            if timeframe == "today":
+                start_date = date.today()
+                query = query.filter(func.date(Ticket.created_at) == start_date)
+            elif timeframe == "yesterday":
+                yest = date.today() - timedelta(days=1)
+                query = query.filter(func.date(Ticket.created_at) == yest)
+            else:
+                start_date = datetime.utcnow() - timedelta(days=days)
+                query = query.filter(Ticket.created_at >= start_date)
 
-    # 1️⃣ Total tickets
-    total_tickets = query.count() or 0
+        # 1️⃣ Total tickets
+        total_tickets = query.count() or 0
 
-    # 2️⃣ Status wise count
-    status_counts = (
-        query.with_entities(Ticket.status, func.count(Ticket.id))
-        .group_by(Ticket.status)
-        .all()
-    )
-    raw_status = {status: count for status, count in status_counts}
-    status_data = {
-        "Completed": raw_status.get("completed", 0),
-        "In Progress": raw_status.get("in_progress", 0),
-        "Pending": raw_status.get("Pending", 0)
-    }
-
-    # 3️⃣ Priority wise count
-    priority_counts = (
-        query.with_entities(Ticket.priority, func.count(Ticket.id))
-        .group_by(Ticket.priority)
-        .all()
-    )
-    raw_priority = {priority: count for priority, count in priority_counts if priority}
-    priorities = ["High", "Urgent", "Low"]
-    priority_data = {p: raw_priority.get(p, 0) for p in priorities}
-
-    # 4️⃣ Category wise count
-    category_counts = (
-        query.join(Category, Ticket.category_id == Category.id)
-        .with_entities(Category.name, func.count(Ticket.id))
-        .group_by(Category.name)
-        .all()
-    )
-    raw_category = {cat: count for cat, count in category_counts}
-    all_categories = [c.name for c in Category.query.all()]
-    category_data = {c: raw_category.get(c, 0) for c in all_categories}
-
-    # 5️⃣ Completed tickets in last 30 days (with filters applied)
-    last_30_days = datetime.utcnow() - timedelta(days=30)
-    completed_last_30 = query.filter(
-        Ticket.status == "completed",
-        Ticket.completed_at >= last_30_days
-    ).count() or 0
-
-    # 6️⃣ Total followups (apply clinic_id filter if passed)
-    followup_query = TicketFollowUp.query
-    if clinic_id:
-        followup_query = followup_query.join(Ticket).filter(Ticket.clinic_id == clinic_id)
-    followup_counts = followup_query.count() or 0
-
-    # 7️⃣ Daily tickets count (last 7 days)
-    today = date.today()
-    raw_daily = dict(
-        query.with_entities(func.date(Ticket.created_at), func.count(Ticket.id))
-        .filter(Ticket.created_at >= today - timedelta(days=7))
-        .group_by(func.date(Ticket.created_at))
-        .all()
-    )
-    daily_stats = []
-    for i in range(7):
-        d = today - timedelta(days=i)
-        daily_stats.append({
-            "date": str(d),
-            "count": raw_daily.get(d, 0)
-        })
-    daily_stats.reverse()
-
-    # 8️⃣ Overdue tickets
-    overdue_tickets = query.filter(
-        and_(
-            Ticket.status != "completed",
-            Ticket.due_date < today
+        # 2️⃣ Status wise count
+        status_counts = (
+            query.with_entities(Ticket.status, func.count(Ticket.id))
+            .group_by(Ticket.status)
+            .all()
         )
-    ).all()
-    overdue_list = [
-        {
-            "id": t.id,
-            "title": t.title,
-            "status": t.status,
-            "due_date": str(t.due_date),
-            "created_at": str(t.created_at)
+        raw_status = {status: count for status, count in status_counts if status}
+        # Normalize status values (case-insensitive exact matching)
+        status_data = {
+            "Completed": 0,
+            "In Progress": 0,
+            "Pending": 0
         }
-        for t in overdue_tickets
-    ]
+        # Map actual status values to normalized keys using exact matching
+        for status, count in raw_status.items():
+            if not status:
+                continue
+            status_lower = status.lower().strip()
+            # Exact matching to avoid false positives (e.g., "archived_not_completed")
+            if status_lower == "completed":
+                status_data["Completed"] += count
+            elif status_lower in ["in progress", "in_progress"]:
+                status_data["In Progress"] += count
+            elif status_lower == "pending":
+                status_data["Pending"] += count
 
-    # ✅ Final merged response
-    return jsonify({
-        "total_tickets": total_tickets,
-        "by_status": status_data,
-        "by_priority": priority_data,
-        "by_category": category_data,
-        "completed_last_30_days": completed_last_30,
-        "total_followups": followup_counts,
-        "daily_ticket_stats": daily_stats,
-        "overdue_tickets": overdue_list
-    })
+        # 3️⃣ Priority wise count
+        priority_counts = (
+            query.with_entities(Ticket.priority, func.count(Ticket.id))
+            .group_by(Ticket.priority)
+            .all()
+        )
+        raw_priority = {priority: count for priority, count in priority_counts if priority}
+        priorities = ["High", "Urgent", "Low"]
+        priority_data = {p: raw_priority.get(p, 0) for p in priorities}
+
+        # 4️⃣ Category wise count
+        try:
+            category_counts = (
+                query.join(Category, Ticket.category_id == Category.id)
+                .with_entities(Category.name, func.count(Ticket.id))
+                .group_by(Category.name)
+                .all()
+            )
+            raw_category = {cat: count for cat, count in category_counts if cat}
+            all_categories = [c.name for c in Category.query.all() if c.name]
+            category_data = {c: raw_category.get(c, 0) for c in all_categories}
+        except Exception as e:
+            # If join fails (e.g., no categories or tickets with null category_id), return empty
+            category_data = {}
+
+        # 5️⃣ Completed tickets in last 30 days (with filters applied)
+        last_30_days = datetime.utcnow() - timedelta(days=30)
+        completed_last_30 = query.filter(
+            and_(
+                func.lower(Ticket.status).in_(["completed"]),
+                Ticket.completed_at >= last_30_days
+            )
+        ).count() or 0
+
+        # 6️⃣ Average ticket resolution time (for completed tickets)
+        completed_tickets = query.filter(
+            and_(
+                func.lower(Ticket.status).in_(["completed"]),
+                Ticket.completed_at.isnot(None),
+                Ticket.created_at.isnot(None)
+            )
+        ).all()
+        
+        avg_resolution_time_hours = 0
+        if completed_tickets:
+            # Calculate resolution time for each ticket (completed_at - created_at)
+            resolution_times = [
+                (t.completed_at - t.created_at).total_seconds()
+                for t in completed_tickets
+                if t.completed_at and t.created_at
+            ]
+            
+            if resolution_times:
+                total_seconds = sum(resolution_times)
+                avg_seconds = total_seconds / len(resolution_times)
+                avg_resolution_time_hours = round(avg_seconds / 3600, 2)
+
+        # 7️⃣ Total followups (apply clinic_id filter if passed)
+        try:
+            followup_query = TicketFollowUp.query
+            if clinic_id:
+                followup_query = followup_query.join(Ticket).filter(Ticket.clinic_id == clinic_id)
+            followup_counts = followup_query.count() or 0
+        except Exception as e:
+            followup_counts = 0
+
+        # 8️⃣ Daily tickets count (always shows last 7 days, respects clinic_id and timeframe)
+        today = date.today()
+        # Create a fresh query for daily stats
+        daily_query = Ticket.query
+        
+        # Apply clinic_id filter
+        if clinic_id:
+            daily_query = daily_query.filter(Ticket.clinic_id == clinic_id)
+        
+        # Always show last 7 days in response
+        start_date_for_daily = today - timedelta(days=6)  # 7 days including today
+        
+        # Apply timeframe filter if it exists
+        if timeframe in TIMEFRAME_PRESETS:
+            days = TIMEFRAME_PRESETS[timeframe]
+            if timeframe == "today":
+                # For today, only show today
+                daily_query = daily_query.filter(func.date(Ticket.created_at) == today)
+                start_date_for_daily = today
+            elif timeframe == "yesterday":
+                # For yesterday, only show yesterday
+                yest = today - timedelta(days=1)
+                daily_query = daily_query.filter(func.date(Ticket.created_at) == yest)
+                start_date_for_daily = yest
+            else:
+                # For last_7_days, last_14_days, etc.
+                # Use date comparison to avoid timezone issues
+                start_date_for_query = today - timedelta(days=days - 1)  # Include today
+                daily_query = daily_query.filter(func.date(Ticket.created_at) >= start_date_for_query)
+                # Adjust start_date_for_daily if timeframe is less than 7 days
+                if days < 7:
+                    start_date_for_daily = start_date_for_query
+        
+        # Ensure we're getting at least the date range we want to display
+        daily_query = daily_query.filter(func.date(Ticket.created_at) >= start_date_for_daily)
+        
+        # Get daily counts grouped by date
+        daily_results = daily_query.with_entities(
+            func.date(Ticket.created_at),
+            func.count(Ticket.id)
+        ).group_by(func.date(Ticket.created_at)).all()
+        
+        # Convert to dict with date objects as keys
+        raw_daily = {}
+        for ticket_date, count in daily_results:
+            if ticket_date:
+                raw_daily[ticket_date] = count
+        
+        # Generate stats for last 7 days (always show last 7 days for consistency)
+        daily_stats = []
+        for i in range(7):
+            d = today - timedelta(days=6 - i)  # From 6 days ago (index 0) to today (index 6)
+            daily_stats.append({
+                "date": str(d),
+                "count": raw_daily.get(d, 0)
+            })
+
+        # 9️⃣ Overdue tickets
+        overdue_tickets = query.filter(
+            and_(
+                ~func.lower(Ticket.status).in_(["completed"]),
+                Ticket.due_date.isnot(None),
+                Ticket.due_date < today
+            )
+        ).all()
+        overdue_list = [
+            {
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "due_date": str(t.due_date),
+                "created_at": str(t.created_at)
+            }
+            for t in overdue_tickets
+        ]
+
+        # ✅ Final merged response
+        return jsonify({
+            "total_tickets": total_tickets,
+            "by_status": status_data,
+            "by_priority": priority_data,
+            "by_category": category_data,
+            "completed_last_30_days": completed_last_30,
+            "total_followups": followup_counts,
+            "avg_resolution_time_hours": avg_resolution_time_hours,
+            "daily_ticket_stats": daily_stats,
+            "overdue_tickets": overdue_list
+        })
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        traceback.print_exc()
+        return jsonify({
+            "error": "Failed to fetch ticket stats",
+            "message": error_msg
+        }), 500
