@@ -97,9 +97,9 @@ def create_app(config_path: str | None = None):
             scheduler.start()
             print("✅ Scheduler started - Email processing will run every 10 minutes")
     
-    Initialize scheduler when app is created
-    with app.app_context():
-        setup_scheduler(app)
+    # Initialize scheduler when app is created (currently disabled)
+    # with app.app_context():
+    #     setup_scheduler(app)
     
     # Shutdown scheduler when app closes
     import atexit
