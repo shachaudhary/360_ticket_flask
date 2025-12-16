@@ -24,6 +24,55 @@ from app import llm_client
 # ─── Blueprint ─────────────────────────────────────────────
 ticket_bp = Blueprint("tickets", __name__, url_prefix="/api/tickets")
 
+import requests
+import os
+
+AUTH_SYSTEM_URL = os.getenv(
+    "AUTH_SYSTEM_URL",
+    "https://api.dental360grp.com/api"
+)
+
+def get_clinic_locations_map(clinic_id):
+    """
+    Returns:
+      { location_id (int): location_display_name (str) }
+    Based on Auth API response:
+      { "locations": [ ... ] }
+    """
+    try:
+        url = f"{AUTH_SYSTEM_URL}/clinic_locations/get_all/{clinic_id}"
+        resp = requests.get(url, timeout=5)
+
+        if resp.status_code != 200:
+            return {}
+
+        payload = resp.json()
+
+        # ✅ EXACT key from your response
+        locations = payload.get("locations", [])
+        if not isinstance(locations, list):
+            return {}
+
+        location_map = {}
+        for loc in locations:
+            if not isinstance(loc, dict):
+                continue
+
+            loc_id = loc.get("id")
+            loc_name = (
+                loc.get("location_name")   # ✅ primary
+                or loc.get("display_name") # fallback
+                or f"Location #{loc_id}"
+            )
+
+            if loc_id:
+                location_map[int(loc_id)] = loc_name.strip()
+
+        return location_map
+
+    except Exception as e:
+        print("❌ Failed to fetch clinic locations:", e)
+        return {}
 
 
 # ─────────────────────────────────────────────
@@ -198,21 +247,41 @@ def update_ticket(ticket_id):
         ticket.category_id = data["category_id"]
         category_changed = True
 
+    clinic_id = 1
+    location_map = get_clinic_locations_map(clinic_id)
+
     # --- Location ID
     if "location_id" in data:
         new_location_id = data["location_id"]
-        # Handle None/empty string conversion
+
         if new_location_id == "" or new_location_id is None:
             new_location_id = None
         else:
             try:
                 new_location_id = int(new_location_id)
             except (ValueError, TypeError):
-                return jsonify({"error": "Invalid location_id format. Must be an integer or null"}), 400
-        
+                return jsonify({
+                    "error": "Invalid location_id format. Must be an integer or null"
+                }), 400
+
         if ticket.location_id != new_location_id:
-            updated_fields.append(("location_id", ticket.location_id, new_location_id))
+            old_location_name = location_map.get(
+                ticket.location_id,
+                f"Location #{ticket.location_id}"
+            )
+            new_location_name = location_map.get(
+                new_location_id,
+                f"Location #{new_location_id}"
+            )
+
+            updated_fields.append((
+                "location",
+                old_location_name,
+                new_location_name
+            ))
+
             ticket.location_id = new_location_id
+
 
     # --- Due Date
     if "due_date" in data:
@@ -1349,6 +1418,163 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
         return email_content[:200] if email_content else "(no content)"
 
 
+import re
+def sanitize_oss_output(text: str) -> str:
+    # Remove <|...|> tokens
+    text = re.sub(r"<\|[^|]+\|>", " ", text)
+
+    # Remove common OSS channel words
+    text = re.sub(
+        r"\b(assistant|final|system|user|message|response)\b",
+        " ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Remove instruction echoes
+    text = re.sub(
+        r"(return only the title\.?|only return the title\.?)",
+        " ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Normalize spaces
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def generate_ticket_title_with_llm(issue_summary: str,
+                                   sender_name: str = None,
+                                   sender_email: str = None) -> str:
+    """
+    Generate a short IT helpdesk ticket title.
+    - Tries LLM first
+    - Safely extracts a usable title line
+    - Falls back to deterministic cleaning
+    - Max 50 chars, sentence case
+    """
+
+    # -------------------------------
+    # Safety check
+    # -------------------------------
+    if not issue_summary or len(issue_summary.strip()) < 5:
+        return "Email issue reported"
+
+    # -------------------------------
+    # Helper: fallback title builder
+    # -------------------------------
+    STOP_WORDS = {
+        "and", "the", "a", "an", "in", "to", "for", "of",
+        "is", "are", "needs", "needed", "please", "kindly",
+        "urgent", "immediate", "attention", "asap",
+        "office", "test", "dev"
+    }
+
+    def build_fallback_title(text: str) -> str:
+        words = re.findall(r"\b[a-zA-Z]+\b", text.lower())
+        clean = [w for w in words if w not in STOP_WORDS]
+
+        title = " ".join(clean[:5]).capitalize()
+        return title if len(title) >= 5 else "Email issue reported"
+
+    # -------------------------------
+    # Helper: extract usable title line
+    # -------------------------------
+    def extract_title_line(text: str) -> str:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+        for line in lines:
+            lower = line.lower()
+
+            # Skip explanation / analysis lines
+            if any(x in lower for x in [
+                "analysis", "here is", "ticket title",
+                "subject", "explanation", "based on"
+            ]):
+                continue
+
+            word_count = len(line.split())
+            if 3 <= word_count <= 8:
+                return line
+
+        return ""
+
+    # -------------------------------
+    # LLM attempt
+    # -------------------------------
+    try:
+        system_prompt = """
+You generate IT helpdesk ticket titles.
+
+Return ONLY one short title.
+
+Rules:
+- 3 to 6 words
+- Technical issue only
+- No urgency words
+- No locations
+- No names
+- No explanations
+
+Examples:
+Email: "Printer not responding in office and needs immediate attention"
+Title: Printer not responding
+
+Email: "Outlook emails are not syncing since morning"
+Title: Outlook email not syncing
+
+Email: "VPN fails to connect on laptop"
+Title: VPN connection failing
+
+Return only the title.
+"""
+
+        user_prompt = f"Email content:\n{issue_summary[:400]}"
+
+        response = llm_client.chat.completions.create(
+            model="gpt_oss_20b",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0
+        )
+
+        raw_output = response.choices[0].message.content.strip()
+
+        # Remove model tags if present
+        raw_output = re.sub(r"<\|[^|]+\|>", "", raw_output).strip()
+        raw_output = sanitize_oss_output(raw_output)
+
+
+        llm_title = extract_title_line(raw_output)
+
+        if llm_title:
+            # Normalize spacing
+            llm_title = re.sub(r"\s+", " ", llm_title)
+
+            # Enforce 50 char limit
+            if len(llm_title) > 50:
+                llm_title = " ".join(llm_title.split()[:6])
+
+            # Sentence case
+            words = llm_title.split()
+            llm_title = " ".join(
+                [words[0].capitalize()] + [w.lower() for w in words[1:]]
+            )
+
+            return llm_title
+
+        # If LLM response unusable → fallback
+        print("⚠️ LLM title invalid, using fallback")
+        return build_fallback_title(issue_summary)
+
+    except Exception as e:
+        print(f"⚠️ Error generating ticket title with LLM: {e}")
+        return build_fallback_title(issue_summary)
+
 def clean_email_content_with_llm(email_content: str) -> str:
     """
     Clean email content using LLM to extract ONLY the NEWEST reply content.
@@ -1774,11 +2000,14 @@ def _process_emails_internal():
                 existing_conversation = None
                 if conversation_id:
                     # Check if ANY email in this conversation already has a ticket
-                    existing_conversation = EmailProcessedLog.query.filter_by(
-                        conversation_id=conversation_id
-                    ).filter(
-                        EmailProcessedLog.ticket_id.isnot(None)  # Only get entries with tickets
-                    ).order_by(EmailProcessedLog.processed_at.desc()).first()  # Get most recent
+                    existing_conversation = (
+                        EmailProcessedLog.query
+                        .filter_by(conversation_id=conversation_id)
+                        .with_for_update()   # 🔒 LOCK ROW
+                        .filter(EmailProcessedLog.ticket_id.isnot(None))
+                        .first()
+                    )
+
                     
                     if existing_conversation:
                         print(f"🔍 Found existing conversation {conversation_id} with ticket #{existing_conversation.ticket_id}")
@@ -1997,10 +2226,15 @@ def _process_emails_internal():
                     analyzed_issue = analyze_email_issue_with_llm(initial_content)
                     print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
                     
-                    # Create ticket with analyzed issue as details
+                    # Step 2: Generate a short, clear title from the analyzed issue
+                    print(f"🔍 Generating ticket title from analyzed issue...")
+                    generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
+                    print(f"✅ Generated title: {generated_title}")
+                    
+                    # Create ticket with LLM-generated title and analyzed issue as details
                     ticket = Ticket(
                         clinic_id=None,  # Can be set later if needed
-                        title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
+                        title=generated_title,
                         details=analyzed_issue or "(no content)",  # Use analyzed issue as ticket message
                         category_id=category_id,
                         status="Pending",
@@ -2133,7 +2367,7 @@ def read_emails():
         
         # Get query parameters
         limit = request.args.get("limit", 50, type=int)
-        hours = request.args.get("hours", 24, type=int)
+        hours = request.args.get("hours", 2400, type=int)
         
         # Validate and cap limit
         if limit < 1:
@@ -2521,10 +2755,15 @@ def reprocess_email(email_id):
         
         main_content = clean_email_content_with_llm(initial_content)
         
-        # Analyze email content to extract the main issue for ticket message
+        # Step 1: Analyze email content to extract the main issue for ticket message
         print(f"🔍 Analyzing email content to extract main issue...")
         analyzed_issue = analyze_email_issue_with_llm(initial_content)
         print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
+        
+        # Step 2: Generate a short, clear title from the analyzed issue
+        print(f"🔍 Generating ticket title from analyzed issue...")
+        generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
+        print(f"✅ Generated title: {generated_title}")
         
         # Find IT category
         category_id = None
@@ -2536,7 +2775,7 @@ def reprocess_email(email_id):
         
         ticket = Ticket(
             clinic_id=None,
-            title=subject or "Email from " + (sender_name or sender_email or "Unknown"),
+            title=generated_title,
             details=analyzed_issue or "(no content)",  # Use analyzed issue as ticket message
             category_id=category_id,
             status="Pending",
