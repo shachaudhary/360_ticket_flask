@@ -1346,17 +1346,17 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
     
     try:
         system_prompt = (
-            "Analyze this email and extract the main issue or problem being reported. "
-            "Return ONLY a clear, concise summary of the issue. "
-            "Focus on what needs to be done or what problem needs to be solved. "
+            "Extract the main issue or problem from this email. "
+            "CRITICAL: Return ONLY the issue description, NO analysis, NO explanations, NO prefixes. "
+            "Do NOT say 'the issue is' or 'the problem is' - just state the issue directly. "
             "Do NOT include greetings, signatures, or pleasantries. "
-            "Do NOT include analysis or explanation - just state the issue clearly. "
-            "If the email is asking for help, state what help is needed. "
-            "If it's reporting a problem, state what the problem is. "
-            "Keep it brief and actionable (2-3 sentences maximum)."
+            "If asking for help, state what help is needed. "
+            "If reporting a problem, state what the problem is. "
+            "Keep it brief and actionable (2-3 sentences maximum). "
+            "Output ONLY the issue text, nothing else."
         )
         
-        user_prompt = f"""Analyze this email and extract the main issue:
+        user_prompt = f"""Extract ONLY the main issue from this email. Return ONLY the issue description:
 
 {email_content[:2000]}"""
         
@@ -1371,6 +1371,16 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
         )
         
         analyzed_issue = response.choices[0].message.content.strip()
+        print(f"🔍 Raw analyzed issue: {analyzed_issue[:200]}")
+        
+        # Handle structured output format
+        final_match = re.search(
+            r"<\|channel\|>final<\|message\|>(.*?)(?:<\|channel\|>|$)",
+            analyzed_issue,
+            re.DOTALL | re.IGNORECASE
+        )
+        if final_match:
+            analyzed_issue = final_match.group(1).strip()
         
         # Clean up any analysis artifacts
         analyzed_issue = re.sub(r"<\|[^|]+\|>", "", analyzed_issue).strip()
@@ -1382,7 +1392,12 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
             "the main issue",
             "the problem",
             "issue:",
-            "problem:"
+            "problem:",
+            "based on the email",
+            "the email indicates",
+            "this email shows",
+            "the user reports",
+            "the user is reporting"
         ]
         
         for prefix in analysis_prefixes:
@@ -1392,11 +1407,29 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
                     analyzed_issue = analyzed_issue[1:].strip()
                 break
         
+        # Remove analysis text patterns
+        analysis_patterns = [
+            r"analysis[:\s]*",
+            r"the email[:\s]*",
+            r"this email[:\s]*",
+            r"we need to[:\s]*",
+            r"the user says[:\s]*",
+            r"let's parse[:\s]*"
+        ]
+        
+        for pattern in analysis_patterns:
+            analyzed_issue = re.sub(pattern, "", analyzed_issue, flags=re.IGNORECASE)
+        
+        analyzed_issue = analyzed_issue.strip()
+        
         # If result is too short or looks like analysis, use fallback
         if (len(analyzed_issue) < 10 or 
-            "analysis" in analyzed_issue.lower()[:50] or
-            "the email" in analyzed_issue.lower()[:50] or
-            "this email" in analyzed_issue.lower()[:50]):
+            "analysis" in analyzed_issue.lower()[:100] or
+            "the email" in analyzed_issue.lower()[:100] or
+            "this email" in analyzed_issue.lower()[:100] or
+            "we need to" in analyzed_issue.lower()[:100] or
+            "the conversation shows" in analyzed_issue.lower()[:100]):
+            print(f"⚠️ Analyzed issue contains analysis text, using fallback")
             # Fallback: use first meaningful sentence from content
             sentences = email_content.split('.')
             for sentence in sentences:
@@ -1405,6 +1438,7 @@ def analyze_email_issue_with_llm(email_content: str) -> str:
                     return sentence
             return email_content[:200] if email_content else "(no content)"
         
+        print(f"✅ Final analyzed issue: {analyzed_issue[:200]}")
         return analyzed_issue
         
     except Exception as e:
@@ -1425,19 +1459,40 @@ def sanitize_oss_output(text: str) -> str:
 
     # Remove common OSS channel words
     text = re.sub(
-        r"\b(assistant|final|system|user|message|response)\b",
+        r"\b(assistant|final|system|user|message|response|channel|start|end)\b",
         " ",
         text,
         flags=re.IGNORECASE
     )
 
-    # Remove instruction echoes
+    # Remove instruction echoes and analysis patterns
     text = re.sub(
-        r"(return only the title\.?|only return the title\.?)",
+        r"(return only the title\.?|only return the title\.?|title:|subject:|analysis|here is|based on|the title is|we need|user wants)",
         " ",
         text,
         flags=re.IGNORECASE
     )
+
+    # Remove analysis text patterns (like "Analysisuser Wants A Ticket Title")
+    # Split on word boundaries and remove "analysis" prefix if present
+    words = text.split()
+    if len(words) > 0:
+        first_word_lower = words[0].lower()
+        # Check if first word contains "analysis" (like "Analysisuser")
+        if "analysis" in first_word_lower:
+            # Remove "analysis" prefix from first word
+            cleaned_first = re.sub(r"analysis", "", first_word_lower, flags=re.IGNORECASE)
+            if cleaned_first:
+                words[0] = cleaned_first.capitalize()
+            else:
+                words = words[1:]  # Remove the word entirely if it was just "analysis"
+        # Also check for "wants" pattern (like "Wants A Ticket Title")
+        if len(words) > 1 and words[1].lower() in ["wants", "needs", "requires"]:
+            # Skip "wants/needs/requires" and the following words if they're generic
+            if len(words) > 2 and words[2].lower() in ["a", "an", "the", "ticket", "title"]:
+                # This looks like analysis text, extract meaningful words instead
+                words = [w for w in words if w.lower() not in ["wants", "needs", "requires", "a", "an", "the", "ticket", "title"]]
+        text = " ".join(words)
 
     # Normalize spaces
     text = re.sub(r"\s+", " ", text).strip()
@@ -1473,6 +1528,23 @@ def generate_ticket_title_with_llm(issue_summary: str,
     }
 
     def build_fallback_title(text: str) -> str:
+        # Try to extract first meaningful sentence or phrase
+        # Remove common prefixes
+        text = re.sub(r"^(the issue is|the problem is|issue:|problem:)\s*", "", text, flags=re.IGNORECASE)
+        text = text.strip()
+        
+        # Try to get first sentence (up to first period or comma)
+        first_sentence_match = re.match(r"^([^.,]{10,60})", text)
+        if first_sentence_match:
+            first_sentence = first_sentence_match.group(1).strip()
+            words = re.findall(r"\b[a-zA-Z]+\b", first_sentence.lower())
+            clean = [w for w in words if w not in STOP_WORDS]
+            if len(clean) >= 2:
+                title = " ".join(clean[:6]).capitalize()
+                if len(title) >= 5:
+                    return title
+        
+        # Fallback: extract meaningful words from whole text
         words = re.findall(r"\b[a-zA-Z]+\b", text.lower())
         clean = [w for w in words if w not in STOP_WORDS]
 
@@ -1483,53 +1555,134 @@ def generate_ticket_title_with_llm(issue_summary: str,
     # Helper: extract usable title line
     # -------------------------------
     def extract_title_line(text: str) -> str:
+        # First, try to extract from structured format if present
+        # Pattern: <|channel|>final<|message|>ACTUAL_TITLE
+        final_match = re.search(
+            r"<\|channel\|>final<\|message\|>(.*?)(?:<\|channel\|>|$)",
+            text,
+            re.DOTALL | re.IGNORECASE
+        )
+        if final_match:
+            text = final_match.group(1).strip()
+        
+        # CRITICAL: Extract quoted titles from analysis text
+        # Pattern: "Title here" or 'Title here'
+        quoted_titles = re.findall(r'["\']([^"\']{5,50})["\']', text)
+        if quoted_titles:
+            # Filter out titles that are too long or contain analysis words
+            for quoted in quoted_titles:
+                quoted = quoted.strip()
+                # Skip if empty or too short
+                if len(quoted) < 5:
+                    continue
+                lower_quoted = quoted.lower()
+                # Skip if it contains analysis keywords
+                if any(kw in lower_quoted for kw in ["analysis", "we need", "generate", "title:", "subject:"]):
+                    continue
+                word_count = len(quoted.split())
+                if 2 <= word_count <= 8:
+                    print(f"✅ Found quoted title: {quoted}")
+                    return quoted
+        
+        # Try to extract titles after "maybe" or "or" patterns
+        # Pattern: "maybe 'Title'" or "or 'Title'"
+        maybe_match = re.search(r'(?:maybe|or|suggest|title:)\s*["\']([^"\']{5,50})["\']', text, re.IGNORECASE)
+        if maybe_match:
+            title = maybe_match.group(1).strip()
+            word_count = len(title.split())
+            if 2 <= word_count <= 8:
+                print(f"✅ Found title after 'maybe/or': {title}")
+                return title
+        
+        # Split into lines and process
         lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+        # Analysis text patterns to skip
+        analysis_patterns = [
+            "analysis", "here is", "ticket title", "subject:", "explanation", 
+            "based on", "the title is", "we need", "user wants", "analysisuser",
+            "wants a ticket", "needs a ticket", "requires a ticket",
+            "return only", "only return", "title:", "subject:",
+            "to generate", "we need to", "so maybe", "the issue:"
+        ]
 
         for line in lines:
             lower = line.lower()
-
+            
             # Skip explanation / analysis lines
-            if any(x in lower for x in [
-                "analysis", "here is", "ticket title",
-                "subject", "explanation", "based on"
-            ]):
+            if any(pattern in lower for pattern in analysis_patterns):
                 continue
+            
+            # Check if line starts with analysis words (like "Analysisuser Wants")
+            words = line.split()
+            if len(words) > 0:
+                first_word_lower = words[0].lower()
+                # Skip if first word contains "analysis" or starts with "to"
+                if "analysis" in first_word_lower or first_word_lower == "to":
+                    continue
+                # Skip if pattern is "Wants A Ticket Title" or similar
+                if len(words) > 1 and words[1].lower() in ["wants", "needs", "requires", "generate"]:
+                    if len(words) > 2 and words[2].lower() in ["a", "an", "the", "ticket", "title"]:
+                        continue
 
             word_count = len(line.split())
-            if 3 <= word_count <= 8:
+            # Accept 2-8 words for title (more flexible)
+            if 2 <= word_count <= 8:
                 return line
 
+        # If no line found, try to extract from the whole text
+        # Look for meaningful phrases after colons or in quotes
+        colon_match = re.search(r':\s*["\']?([A-Z][^:."]{10,50})["\']?', text)
+        if colon_match:
+            potential_title = colon_match.group(1).strip()
+            word_count = len(potential_title.split())
+            if 2 <= word_count <= 8 and not any(kw in potential_title.lower() for kw in ["analysis", "we need", "generate"]):
+                print(f"✅ Found title after colon: {potential_title}")
+                return potential_title
+        
+        # Last resort: Remove analysis patterns and get first meaningful phrase
+        cleaned = sanitize_oss_output(text)
+        words = cleaned.split()
+        # Filter out analysis words
+        meaningful_words = [w for w in words if w.lower() not in [
+            "analysis", "wants", "needs", "requires", "a", "an", "the", 
+            "ticket", "title", "subject", "here", "is", "based", "on",
+            "to", "generate", "maybe", "so", "but", "we", "must", "need"
+        ]]
+        
+        if len(meaningful_words) >= 2:
+            return " ".join(meaningful_words[:6])  # Max 6 words
+        
         return ""
 
     # -------------------------------
     # LLM attempt
     # -------------------------------
     try:
-        system_prompt = """
-You generate IT helpdesk ticket titles.
+        system_prompt = """You are a ticket title generator. Generate ONLY a short technical title.
 
-Return ONLY one short title.
+CRITICAL RULES:
+- Output ONLY the title text, nothing else
+- NO explanations, NO analysis, NO prefixes like "Title:" or "Subject:"
+- NO phrases like "user wants" or "we need"
+- 3 to 6 words maximum
+- Technical issue description only
+- No urgency words (urgent, immediate, asap)
+- No location names
+- No person names
+- No greetings or signatures
 
-Rules:
-- 3 to 6 words
-- Technical issue only
-- No urgency words
-- No locations
-- No names
-- No explanations
+EXAMPLES:
+Input: "Printer not responding in office and needs immediate attention"
+Output: Printer not responding
 
-Examples:
-Email: "Printer not responding in office and needs immediate attention"
-Title: Printer not responding
+Input: "Outlook emails are not syncing since morning"
+Output: Outlook email not syncing
 
-Email: "Outlook emails are not syncing since morning"
-Title: Outlook email not syncing
+Input: "VPN fails to connect on laptop"
+Output: VPN connection failing
 
-Email: "VPN fails to connect on laptop"
-Title: VPN connection failing
-
-Return only the title.
-"""
+Remember: Output ONLY the title text, no other words."""
 
         user_prompt = f"Email content:\n{issue_summary[:400]}"
 
@@ -1543,17 +1696,57 @@ Return only the title.
         )
 
         raw_output = response.choices[0].message.content.strip()
+        print(f"🔍 Raw LLM output: {raw_output[:200]}")
 
-        # Remove model tags if present
+        # Handle structured output format: <|channel|>analysis<|message|>...<|channel|>final<|message|>TITLE
+        # First, try to extract final channel if present
+        final_channel_match = re.search(
+            r"<\|channel\|>final<\|message\|>(.*?)(?:<\|channel\|>|$)",
+            raw_output,
+            re.DOTALL | re.IGNORECASE
+        )
+        if final_channel_match:
+            raw_output = final_channel_match.group(1).strip()
+            print(f"🔍 Extracted from final channel: {raw_output[:200]}")
+        else:
+            # If no final channel, try to extract from analysis channel (might contain quoted title)
+            analysis_match = re.search(
+                r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|channel\|>|$)",
+                raw_output,
+                re.DOTALL | re.IGNORECASE
+            )
+            if analysis_match:
+                raw_output = analysis_match.group(1).strip()
+                print(f"🔍 Extracted from analysis channel: {raw_output[:200]}")
+
+        # Remove remaining model tags if present
         raw_output = re.sub(r"<\|[^|]+\|>", "", raw_output).strip()
-        raw_output = sanitize_oss_output(raw_output)
-
-
+        
+        # Try extraction BEFORE sanitization (to preserve quoted titles)
         llm_title = extract_title_line(raw_output)
+        
+        # If extraction failed, sanitize and try again
+        if not llm_title:
+            raw_output = sanitize_oss_output(raw_output)
+            print(f"🔍 After sanitization: {raw_output[:200]}")
+            llm_title = extract_title_line(raw_output)
+        
+        print(f"🔍 Extracted title: {llm_title}")
 
         if llm_title:
             # Normalize spacing
-            llm_title = re.sub(r"\s+", " ", llm_title)
+            llm_title = re.sub(r"\s+", " ", llm_title).strip()
+
+            # Final validation: check for analysis patterns
+            lower_title = llm_title.lower()
+            analysis_keywords = [
+                "analysis", "wants a ticket", "needs a ticket", "user wants",
+                "analysisuser", "the title is", "here is", "subject:"
+            ]
+            
+            if any(keyword in lower_title for keyword in analysis_keywords):
+                print(f"⚠️ Title contains analysis text, using fallback")
+                return build_fallback_title(issue_summary)
 
             # Enforce 50 char limit
             if len(llm_title) > 50:
@@ -1561,10 +1754,20 @@ Return only the title.
 
             # Sentence case
             words = llm_title.split()
-            llm_title = " ".join(
-                [words[0].capitalize()] + [w.lower() for w in words[1:]]
-            )
+            if len(words) > 0:
+                llm_title = " ".join(
+                    [words[0].capitalize()] + [w.lower() for w in words[1:]]
+                )
+            else:
+                print(f"⚠️ Empty title after processing, using fallback")
+                return build_fallback_title(issue_summary)
 
+            # Final length check
+            if len(llm_title.strip()) < 3:
+                print(f"⚠️ Title too short, using fallback")
+                return build_fallback_title(issue_summary)
+
+            print(f"✅ Final title: {llm_title}")
             return llm_title
 
         # If LLM response unusable → fallback
@@ -2222,8 +2425,10 @@ def _process_emails_internal():
                     print(f"📝 Creating new ticket for conversation_id: {conversation_id or 'None'}")
                     
                     # Step 1: Analyze email content to extract the main issue for ticket message
-                    print(f"🔍 Analyzing email content to extract main issue...")
-                    analyzed_issue = analyze_email_issue_with_llm(initial_content)
+                    # Use main_content (cleaned) if it's substantial, otherwise use initial_content
+                    content_for_analysis = main_content if len(main_content.strip()) > 50 else initial_content
+                    print(f"🔍 Analyzing email content to extract main issue (using {len(content_for_analysis)} chars)...")
+                    analyzed_issue = analyze_email_issue_with_llm(content_for_analysis)
                     print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
                     
                     # Step 2: Generate a short, clear title from the analyzed issue
@@ -2762,7 +2967,7 @@ def reprocess_email(email_id):
         
         # Step 2: Generate a short, clear title from the analyzed issue
         print(f"🔍 Generating ticket title from analyzed issue...")
-        generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
+        generated_title = generate_ticket_title_with_llm(main_content, sender_name, sender_email)
         print(f"✅ Generated title: {generated_title}")
         
         # Find IT category
