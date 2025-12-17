@@ -26,6 +26,9 @@ def get_ticket_stats():
         # 🔹 Query params
         timeframe = request.args.get("timeframe")
         clinic_id = request.args.get("clinic_id", type=int)
+        category_id = request.args.get("category_id", type=int)
+        start_date_param = request.args.get("start_date")
+        end_date_param = request.args.get("end_date")
 
         # 🔹 Base query
         query = Ticket.query
@@ -34,8 +37,28 @@ def get_ticket_stats():
         if clinic_id:
             query = query.filter(Ticket.clinic_id == clinic_id)
 
-        # 🔹 Filter by timeframe
-        if timeframe in TIMEFRAME_PRESETS:
+        # 🔹 Filter by category_id
+        if category_id:
+            query = query.filter(Ticket.category_id == category_id)
+
+        # 🔹 Filter by start_date and end_date (takes precedence over timeframe)
+        if start_date_param or end_date_param:
+            try:
+                if start_date_param:
+                    start_date_obj = datetime.strptime(start_date_param, "%Y-%m-%d").date()
+                    query = query.filter(func.date(Ticket.created_at) >= start_date_obj)
+                
+                if end_date_param:
+                    end_date_obj = datetime.strptime(end_date_param, "%Y-%m-%d").date()
+                    query = query.filter(func.date(Ticket.created_at) <= end_date_obj)
+            except ValueError as e:
+                return jsonify({
+                    "error": "Invalid date format",
+                    "message": "Date must be in YYYY-MM-DD format",
+                    "details": str(e)
+                }), 400
+        # 🔹 Filter by timeframe (only if start_date/end_date not provided)
+        elif timeframe in TIMEFRAME_PRESETS:
             days = TIMEFRAME_PRESETS[timeframe]
             if timeframe == "today":
                 start_date = date.today()
@@ -133,16 +156,34 @@ def get_ticket_stats():
                 avg_seconds = total_seconds / len(resolution_times)
                 avg_resolution_time_hours = round(avg_seconds / 3600, 2)
 
-        # 7️⃣ Total followups (apply clinic_id filter if passed)
+        # 7️⃣ Total followups (apply clinic_id, category_id and date filters if passed)
         try:
-            followup_query = TicketFollowUp.query
+            followup_query = TicketFollowUp.query.join(Ticket)
             if clinic_id:
-                followup_query = followup_query.join(Ticket).filter(Ticket.clinic_id == clinic_id)
+                followup_query = followup_query.filter(Ticket.clinic_id == clinic_id)
+            
+            if category_id:
+                followup_query = followup_query.filter(Ticket.category_id == category_id)
+            
+            # Apply date filters to followups (based on ticket created_at)
+            if start_date_param:
+                try:
+                    start_date_obj = datetime.strptime(start_date_param, "%Y-%m-%d").date()
+                    followup_query = followup_query.filter(func.date(Ticket.created_at) >= start_date_obj)
+                except ValueError:
+                    pass
+            if end_date_param:
+                try:
+                    end_date_obj = datetime.strptime(end_date_param, "%Y-%m-%d").date()
+                    followup_query = followup_query.filter(func.date(Ticket.created_at) <= end_date_obj)
+                except ValueError:
+                    pass
+            
             followup_counts = followup_query.count() or 0
         except Exception as e:
             followup_counts = 0
 
-        # 8️⃣ Daily tickets count (always shows last 7 days, respects clinic_id and timeframe)
+        # 8️⃣ Daily tickets count (respects clinic_id, category_id, timeframe, and date filters)
         today = date.today()
         # Create a fresh query for daily stats
         daily_query = Ticket.query
@@ -151,32 +192,60 @@ def get_ticket_stats():
         if clinic_id:
             daily_query = daily_query.filter(Ticket.clinic_id == clinic_id)
         
-        # Always show last 7 days in response
-        start_date_for_daily = today - timedelta(days=6)  # 7 days including today
+        # Apply category_id filter
+        if category_id:
+            daily_query = daily_query.filter(Ticket.category_id == category_id)
         
-        # Apply timeframe filter if it exists
-        if timeframe in TIMEFRAME_PRESETS:
+        # Determine date range for daily stats
+        start_date_for_daily = today - timedelta(days=6)  # Default: last 7 days
+        end_date_for_daily = today
+        
+        # Apply start_date and end_date filters (takes precedence)
+        if start_date_param or end_date_param:
+            try:
+                if start_date_param:
+                    start_date_obj = datetime.strptime(start_date_param, "%Y-%m-%d").date()
+                    daily_query = daily_query.filter(func.date(Ticket.created_at) >= start_date_obj)
+                    start_date_for_daily = start_date_obj
+                
+                if end_date_param:
+                    end_date_obj = datetime.strptime(end_date_param, "%Y-%m-%d").date()
+                    daily_query = daily_query.filter(func.date(Ticket.created_at) <= end_date_obj)
+                    end_date_for_daily = end_date_obj
+                elif start_date_param:
+                    # If only start_date provided, show from start_date to today
+                    end_date_for_daily = today
+            except ValueError:
+                pass  # Already handled above
+        # Apply timeframe filter if it exists (only if start_date/end_date not provided)
+        elif timeframe in TIMEFRAME_PRESETS:
             days = TIMEFRAME_PRESETS[timeframe]
             if timeframe == "today":
                 # For today, only show today
                 daily_query = daily_query.filter(func.date(Ticket.created_at) == today)
                 start_date_for_daily = today
+                end_date_for_daily = today
             elif timeframe == "yesterday":
                 # For yesterday, only show yesterday
                 yest = today - timedelta(days=1)
                 daily_query = daily_query.filter(func.date(Ticket.created_at) == yest)
                 start_date_for_daily = yest
+                end_date_for_daily = yest
             else:
                 # For last_7_days, last_14_days, etc.
                 # Use date comparison to avoid timezone issues
                 start_date_for_query = today - timedelta(days=days - 1)  # Include today
                 daily_query = daily_query.filter(func.date(Ticket.created_at) >= start_date_for_query)
-                # Adjust start_date_for_daily if timeframe is less than 7 days
-                if days < 7:
-                    start_date_for_daily = start_date_for_query
+                start_date_for_daily = start_date_for_query
+                end_date_for_daily = today
         
         # Ensure we're getting at least the date range we want to display
-        daily_query = daily_query.filter(func.date(Ticket.created_at) >= start_date_for_daily)
+        daily_query = daily_query.filter(
+            and_(
+                func.date(Ticket.created_at) >= start_date_for_daily,
+                func.date(Ticket.created_at) <= end_date_for_daily
+            )
+        )
         
         # Get daily counts grouped by date
         daily_results = daily_query.with_entities(
@@ -190,14 +259,15 @@ def get_ticket_stats():
             if ticket_date:
                 raw_daily[ticket_date] = count
         
-        # Generate stats for last 7 days (always show last 7 days for consistency)
+        # Generate stats for the date range
         daily_stats = []
-        for i in range(7):
-            d = today - timedelta(days=6 - i)  # From 6 days ago (index 0) to today (index 6)
+        current_date = start_date_for_daily
+        while current_date <= end_date_for_daily:
             daily_stats.append({
-                "date": str(d),
-                "count": raw_daily.get(d, 0)
+                "date": str(current_date),
+                "count": raw_daily.get(current_date, 0)
             })
+            current_date += timedelta(days=1)
 
         # 9️⃣ Overdue tickets
         overdue_tickets = query.filter(
