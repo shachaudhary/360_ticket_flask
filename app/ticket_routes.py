@@ -5,7 +5,7 @@ from app import db
 import aiohttp
 from aiohttp import BasicAuth
 import asyncio, sys, threading
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 import re
 import html
 
@@ -735,7 +735,25 @@ def get_tickets():
     query = Ticket.query
 
     if status:
-        query = query.filter(Ticket.status.ilike(f"%{status}%"))
+        # Handle multiple statuses (comma-separated)
+        status_list = [s.strip() for s in status.split(",") if s.strip()]
+        
+        # Only proceed if we have valid statuses
+        if status_list:
+            # Create filters for each status (case-insensitive, handles variations)
+            status_filters = []
+            for s in status_list:
+                # Normalize: handle "in progress" vs "in_progress" variations
+                s_normalized = s.lower().replace(" ", "_")
+                status_filters.append(
+                    or_(
+                        Ticket.status.ilike(f"%{s}%"),
+                        func.lower(Ticket.status).like(f"%{s_normalized}%"),
+                        func.lower(Ticket.status).like(f"%{s_normalized.replace('_', ' ')}%")
+                    )
+                )
+            
+            query = query.filter(or_(*status_filters))
     if category_id:
         query = query.filter(Ticket.category_id == category_id)
     if start_date:
@@ -1249,7 +1267,25 @@ def filter_tickets():
 
     # ✅ Apply filters
     if status:
-        query = query.filter(Ticket.status.ilike(f"%{status}%"))
+        # Handle multiple statuses (comma-separated)
+        status_list = [s.strip() for s in status.split(",") if s.strip()]
+        
+        # Only proceed if we have valid statuses
+        if status_list:
+            # Create filters for each status (case-insensitive, handles variations)
+            status_filters = []
+            for s in status_list:
+                # Normalize: handle "in progress" vs "in_progress" variations
+                s_normalized = s.lower().replace(" ", "_")
+                status_filters.append(
+                    or_(
+                        Ticket.status.ilike(f"%{s}%"),
+                        func.lower(Ticket.status).like(f"%{s_normalized}%"),
+                        func.lower(Ticket.status).like(f"%{s_normalized.replace('_', ' ')}%")
+                    )
+                )
+            
+            query = query.filter(or_(*status_filters))
     if category_id:
         query = query.filter(Ticket.category_id == category_id)
     if start_date:
