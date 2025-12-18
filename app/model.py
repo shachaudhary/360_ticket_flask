@@ -57,6 +57,7 @@ class TicketFile(db.Model):
 
     id         = db.Column(db.Integer, primary_key=True)
     ticket_id  = db.Column(db.Integer)
+    comment_id = db.Column(db.Integer, nullable=True)  # Link file to a comment if uploaded with comment
     file_url   = db.Column(db.Text)
     file_name  = db.Column(db.String(255))
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -351,3 +352,10 @@ class ProjectAssignment(db.Model):
 
     def __repr__(self):
         return f"<ProjectAssignment project_id={self.project_id} user_id={self.user_id}>"
+
+class EmailConversationLock(db.Model):
+    __tablename__ = "email_conversation_locks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(db.String(255), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

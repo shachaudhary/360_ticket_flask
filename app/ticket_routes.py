@@ -899,10 +899,11 @@ def get_tickets():
 
 
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # Get Ticket with all details
 @ticket_bp.route("/ticket/<int:ticket_id>", methods=["GET"])
-# @require_api_key
-# @validate_token
+@require_api_key
+@validate_token
 def get_ticket(ticket_id):
     ticket = Ticket.query.get(ticket_id)
     if not ticket:
@@ -936,20 +937,29 @@ def get_ticket(ticket_id):
             "changed_by_username": changed_by_info["username"] if changed_by_info else None,
             "changed_at": log.changed_at
         })
-    # --- Files
-    files = [{"name": f.file_name, "url": f.file_url}
-             for f in TicketFile.query.filter_by(ticket_id=ticket.id).all()]
+    # --- Files (exclude comment files - those are shown in comments)
+    files = [
+        {"name": f.file_name, "url": f.file_url}
+        for f in TicketFile.query.filter_by(ticket_id=ticket.id).filter(TicketFile.comment_id.is_(None)).all()
+    ]
     # --- Tags
     tags = [tag.tag_name for tag in TicketTag.query.filter_by(ticket_id=ticket.id).all()]
     # --- Comments
     comments = []
     for c in TicketComment.query.filter_by(ticket_id=ticket.id).order_by(TicketComment.created_at.desc()).all():
         u_info = get_user_info_by_id(c.user_id) if c.user_id else None
+        # Get files attached to this comment
+        comment_files = [
+            {"name": f.file_name, "url": f.file_url}
+            for f in TicketFile.query.filter_by(ticket_id=ticket.id, comment_id=c.id).all()
+        ]
         comments.append({
+            "id": c.id,
             "user_id": c.user_id,
             "username": u_info["username"] if u_info else None,
             "comment": c.comment,
-            "created_at": c.created_at
+            "created_at": c.created_at,
+            "files": comment_files  # Include files for this comment
         })
     # --- Followups
     followups = []
@@ -1096,7 +1106,6 @@ def get_ticket(ticket_id):
     return jsonify(result)
 
 
-# ─────────────────────────────────────────────
 # Add Ticket Activity Comment, Tags 
 @ticket_bp.route("/ticket/activity/<int:ticket_id>", methods=["POST"])
 @require_api_key
@@ -1106,15 +1115,29 @@ def add_ticket_activity(ticket_id):
     if not ticket:
         return jsonify({"error": "Ticket not found"}), 404
 
-    data = request.json
+    # Handle both JSON and form data (for file uploads)
+    if request.is_json:
+        data = request.json
+    else:
+        data = request.form.to_dict()
+    
     user_id = data.get("user_id")      # jis user ne action kiya
     comment_text = data.get("comment") # optional
     user_ids = data.get("user_ids")    # optional: tagging users e.g. [12, 15, 20]
+    
+    # Handle user_ids if it's a string (from form data)
+    if user_ids and isinstance(user_ids, str):
+        try:
+            import json
+            user_ids = json.loads(user_ids)
+        except:
+            user_ids = [int(uid.strip()) for uid in user_ids.split(",") if uid.strip().isdigit()] if user_ids else None
 
     response_data = {
         "success": True,
         "comment": None,
-        "tags": []
+        "tags": [],
+        "files": []
     }
 
     # ─── Add Comment ───
@@ -1126,6 +1149,30 @@ def add_ticket_activity(ticket_id):
             comment=comment_text
         )
         db.session.add(comment)
+        db.session.flush()  # Flush to get comment.id before committing
+        
+        # ─── Handle File Uploads for Comment ───
+        uploaded_files = []
+        if "files" in request.files:
+            for f in request.files.getlist("files"):
+                if f.filename:
+                    try:
+                        print(f"📎 Uploading file for comment: {f.filename}")
+                        file_url = upload_to_s3(f, folder=f"tickets/{ticket_id}/comments/{comment.id}")
+                        tf = TicketFile(
+                            ticket_id=ticket_id,
+                            comment_id=comment.id,  # Link file to comment
+                            file_url=file_url,
+                            file_name=f.filename
+                        )
+                        db.session.add(tf)
+                        uploaded_files.append({"name": f.filename, "url": file_url})
+                        print(f"✅ File uploaded: {f.filename}")
+                    except Exception as e:
+                        print(f"❌ Error uploading file {f.filename}: {e}")
+                        db.session.rollback()
+                        return jsonify({"error": f"Failed to upload file: {str(e)}"}), 500
+        
         db.session.commit()
 
         commenter_info = get_user_info_by_id(user_id)
@@ -1135,8 +1182,10 @@ def add_ticket_activity(ticket_id):
             "user_id": comment.user_id,
             "username": commenter_info["username"] if commenter_info else None,
             "comment": comment.comment,
-            "created_at": comment.created_at
+            "created_at": comment.created_at,
+            "files": uploaded_files  # Include files in comment response
         }
+        response_data["files"] = uploaded_files
 
         # ✅ Collect recipients
         recipients = set()
@@ -1214,6 +1263,9 @@ def add_ticket_activity(ticket_id):
         return jsonify({"error": "Either comment or user_ids required"}), 400
 
     return jsonify(response_data), 200
+
+
+
 
 # ─────────────────────────────────────────────
 # Delete Ticket
@@ -2066,6 +2118,7 @@ def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -
         return fallback_preview or html_body
 
 
+
 def _process_emails_internal():
     """
     Internal function to process emails - can be called from scheduler or route.
@@ -2077,7 +2130,9 @@ def _process_emails_internal():
         import os
         from flask import current_app
         from datetime import timedelta
-        
+        # 🔒 In-memory cache to prevent duplicate tickets in same run
+        conversation_ticket_cache = {}
+
         # Get email address to monitor
         email_address = os.getenv("MICROSOFT_EMAIL", "it.support@dental360grp.com")
         
@@ -2087,7 +2142,8 @@ def _process_emails_internal():
             return {"error": "Failed to get Microsoft Graph access token", "status": "error"}
         
         # Calculate time 10 minutes ago (in UTC)
-        ten_minutes_ago = datetime.utcnow() - timedelta(minutes=7000)
+        ten_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
+
         # Format for Microsoft Graph API (ISO 8601 format)
         time_filter = ten_minutes_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
         
@@ -2250,7 +2306,7 @@ def _process_emails_internal():
                     
                     if existing_conversation:
                         print(f"🔍 Found existing conversation {conversation_id} with ticket #{existing_conversation.ticket_id}")
-                
+                        conversation_ticket_cache[conversation_id] = existing_conversation.ticket_id
                 # Get user_id from sender email
                 user_id = None
                 if sender_email:
@@ -2350,6 +2406,50 @@ def _process_emails_internal():
                     # New conversation: Create new ticket
                     # CRITICAL: Double-check conversation_id wasn't missed (race condition protection)
                     if conversation_id:
+                        # Check if this conversation already has a ticket (from cache)
+                        if conversation_id in conversation_ticket_cache:
+                            print(f"🔍 Found cached ticket #{conversation_ticket_cache[conversation_id]} for conversation {conversation_id}")
+                            ticket = Ticket.query.get(conversation_ticket_cache[conversation_id])
+                            if ticket:
+                                # Add full email content as comment (use raw content, not processed)
+                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
+                                
+                                # Check if this exact comment already exists (prevent duplicates)
+                                existing_comment = TicketComment.query.filter_by(
+                                    ticket_id=ticket.id,
+                                    user_id=user_id,
+                                    comment=comment_text
+                                ).first()
+                                
+                                if existing_comment:
+                                    print(f"⏭️ Comment already exists for email {email_id}, skipping...")
+                                    # Update placeholder log with ticket info
+                                    placeholder_log.ticket_id = ticket.id
+                                    placeholder_log.user_id = user_id
+                                    placeholder_log.is_followup = True
+                                    db.session.commit()
+                                    skipped_count += 1
+                                    continue
+                                
+                                comment = TicketComment(
+                                    ticket_id=ticket.id,
+                                    user_id=user_id,
+                                    comment=comment_text
+                                )
+                                db.session.add(comment)
+                                
+                                # Update placeholder log with ticket info
+                                placeholder_log.ticket_id = ticket.id
+                                placeholder_log.user_id = user_id
+                                placeholder_log.is_followup = True
+                                db.session.commit()
+                                
+                                comments_added += 1
+                                processed_count += 1
+                                print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
+                            else:
+                                print(f"⚠️ Ticket {final_conversation_check.ticket_id} not found for conversation {conversation_id}")
+                            continue
                         # Re-check conversation_id one more time before creating ticket
                         final_conversation_check = EmailProcessedLog.query.filter_by(
                             conversation_id=conversation_id
