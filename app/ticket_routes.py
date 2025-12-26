@@ -2118,21 +2118,28 @@ def extract_main_content_from_html(html_body: str, fallback_preview: str = "") -
         return fallback_preview or html_body
 
 
-
 def _process_emails_internal():
     """
     Internal function to process emails - can be called from scheduler or route.
     Process new emails from it.support@dental360grp.com and create tickets.
     Only processes emails received in the last 10 minutes.
     Uses conversationId to detect duplicates and add follow-ups as comments.
+    
+    DUPLICATE PREVENTION:
+    - Email ID check prevents reprocessing same email
+    - Conversation ID check detects reply threads
+    - Placeholder reservation prevents race conditions
+    - Database locking ensures thread safety
     """
     try:
         import os
         from flask import current_app
         from datetime import timedelta
+        
         # 🔒 In-memory cache to prevent duplicate tickets in same run
+        # This is a performance optimization - database is the source of truth
         conversation_ticket_cache = {}
-
+        
         # Get email address to monitor
         email_address = os.getenv("MICROSOFT_EMAIL", "it.support@dental360grp.com")
         
@@ -2143,18 +2150,17 @@ def _process_emails_internal():
         
         # Calculate time 10 minutes ago (in UTC)
         ten_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
-
-        # Format for Microsoft Graph API (ISO 8601 format)
         time_filter = ten_minutes_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
         
-        # Build the API URL to get unread emails
+        # Build the API URL to get emails
         base_url = f"{GRAPH_BASE_URL}/users/{email_address}/mailFolders/inbox/messages"
         
-        # Query parameters - get unread emails from last 10 minutes only
+        # Query parameters - get emails from last 10 minutes only
+        # ORDER BY ASC to process oldest first (original email before replies)
         params = {
-            '$top': 50,  # Process up to 50 emails at a time
-            '$filter': f'receivedDateTime ge {time_filter}',  # Only emails from last 10 minutes
-            '$orderby': 'receivedDateTime desc',  # Most recent first
+            '$top': 50,
+            '$filter': f'receivedDateTime ge {time_filter}',
+            '$orderby': 'receivedDateTime asc',  # Process oldest first
             '$select': 'id,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,body,hasAttachments,conversationId'
         }
         
@@ -2177,12 +2183,13 @@ def _process_emails_internal():
         data = response.json()
         emails = data.get('value', [])
         
-        processed_count = 0
+        # Metrics tracking
         tickets_created = 0
         comments_added = 0
         skipped_count = 0
+        error_count = 0
         
-        # System email patterns to skip (prevent infinite loops from ticket notification emails)
+        # System email patterns to skip (prevent infinite loops)
         system_email_patterns = [
             "Dental360 New Ticket Assigned:",
             "Dental360 Ticket",
@@ -2194,479 +2201,913 @@ def _process_emails_internal():
             "Contact Form Category Updated"
         ]
         
+        # Process each email
         for email in emails:
             try:
-                email_id = email.get("id")
-                conversation_id = email.get("conversationId")
-                subject = email.get("subject", "")
-                sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
-                sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+                result = _process_single_email(
+                    email, 
+                    conversation_ticket_cache, 
+                    system_email_patterns
+                )
                 
-                # Extract email received time to use as ticket created_at
-                received_datetime_str = email.get("receivedDateTime")
-                email_received_time = None
-                if received_datetime_str:
-                    try:
-                        # Parse ISO 8601 format from Microsoft Graph API (e.g., "2024-01-15T10:30:00Z")
-                        # Replace 'Z' with '+00:00' for fromisoformat compatibility
-                        iso_str = received_datetime_str.replace('Z', '+00:00')
-                        # Handle microseconds if present
-                        if '.' in iso_str and '+' in iso_str:
-                            # Format: 2024-01-15T10:30:00.123456+00:00
-                            email_received_time = datetime.fromisoformat(iso_str)
-                        elif '+' in iso_str:
-                            # Format: 2024-01-15T10:30:00+00:00
-                            email_received_time = datetime.fromisoformat(iso_str)
-                        else:
-                            # Try strptime as fallback
-                            email_received_time = datetime.strptime(received_datetime_str, "%Y-%m-%dT%H:%M:%SZ")
-                        # Convert to UTC naive datetime (since database stores UTC)
-                        if email_received_time.tzinfo:
-                            email_received_time = email_received_time.replace(tzinfo=None)
-                    except Exception as e:
-                        print(f"⚠️ Error parsing receivedDateTime '{received_datetime_str}': {e}")
-                        # Fallback to current time if parsing fails
-                        email_received_time = datetime.utcnow()
-                else:
-                    # Fallback to current time if receivedDateTime is missing
-                    email_received_time = datetime.utcnow()
-                
-                # CRITICAL: Skip if already processed (check by email_id first - most important check)
-                # Use database query with lock to prevent race conditions
-                existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
-                if existing_log:
-                    print(f"⏭️ Email {email_id} already processed, skipping...")
-                    skipped_count += 1
-                    continue
-                
-                # Skip system-generated notification emails (prevent infinite loops)
-                if subject and any(pattern in subject for pattern in system_email_patterns):
-                    print(f"⏭️ Skipping system notification email: {subject}")
-                    # Try to log it as processed - if duplicate, skip
-                    try:
-                        email_log = EmailProcessedLog(
-                            email_id=email_id,
-                            conversation_id=conversation_id,
-                            ticket_id=None,
-                            sender_email=sender_email,
-                            user_id=None,
-                            email_subject=subject,
-                            is_followup=False
-                        )
-                        db.session.add(email_log)
-                        db.session.commit()
-                    except Exception as e:
-                        # Already exists (race condition), skip
-                        db.session.rollback()
-                        print(f"⏭️ System email {email_id} already logged, skipping...")
-                    skipped_count += 1
-                    continue
-                
-                # CRITICAL: Reserve email_id IMMEDIATELY to prevent race conditions
-                # Try to create a placeholder log entry - if it fails, email is already being processed
-                placeholder_log = None
-                try:
-                    placeholder_log = EmailProcessedLog(
-                        email_id=email_id,
-                        conversation_id=conversation_id,
-                        ticket_id=None,  # Will be updated after ticket creation
-                        sender_email=sender_email,
-                        user_id=None,  # Will be updated after user lookup
-                        email_subject=subject,
-                        is_followup=False
-                    )
-                    db.session.add(placeholder_log)
-                    db.session.commit()
-                    print(f"🔒 Reserved email_id {email_id} for processing")
-                except Exception as e:
-                    # Unique constraint violation or other DB error - email already being processed
-                    db.session.rollback()
-                    # Check if it's a unique constraint violation
-                    import sqlalchemy
-                    if isinstance(e, sqlalchemy.exc.IntegrityError) or "unique" in str(e).lower() or "duplicate" in str(e).lower():
-                        print(f"⏭️ Email {email_id} already being processed (unique constraint violation), skipping...")
-                    else:
-                        print(f"⏭️ Email {email_id} reservation failed: {e}, skipping...")
-                    skipped_count += 1
-                    continue
-                
-                # CRITICAL: Check conversation_id EARLY to prevent duplicate tickets
-                # This must be checked BEFORE processing content to avoid race conditions
-                existing_conversation = None
-                if conversation_id:
-                    # Check if ANY email in this conversation already has a ticket
-                    existing_conversation = (
-                        EmailProcessedLog.query
-                        .filter_by(conversation_id=conversation_id)
-                        .with_for_update()   # 🔒 LOCK ROW
-                        .filter(EmailProcessedLog.ticket_id.isnot(None))
-                        .first()
-                    )
-
-                    
-                    if existing_conversation:
-                        print(f"🔍 Found existing conversation {conversation_id} with ticket #{existing_conversation.ticket_id}")
-                        conversation_ticket_cache[conversation_id] = existing_conversation.ticket_id
-                # Get user_id from sender email
-                user_id = None
-                if sender_email:
-                    user_id = get_user_id_by_email(sender_email)
-                    if not user_id:
-                        print(f"⚠️ User not found for email: {sender_email}")
-                
-                # Extract email content - preserve raw content for comments
-                raw_body = email.get("body", {}).get("content") if email.get("body") else None
-                content_type = email.get("body", {}).get("contentType") if email.get("body") else None
-                body_preview = email.get("bodyPreview", "")
-                
-                # Get raw email content for comments (preserve everything)
-                # PRIORITIZE raw_body (full content) over body_preview (truncated preview)
-                if content_type and content_type.lower() == "html" and raw_body:
-                    # For HTML emails, extract text from full body
-                    from html import unescape
-                    import re
-                    # Remove HTML tags but keep the text
-                    text_content = re.sub(r'<[^>]+>', ' ', raw_body)
-                    text_content = unescape(text_content)
-                    # Use full extracted HTML text (not truncated preview)
-                    raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
-                else:
-                    # For plain text emails, use full raw_body, fallback to preview
-                    raw_email_content = (raw_body or body_preview or "").strip()
-                
-                # Extract main content for analysis (this can be cleaned)
-                if content_type and content_type.lower() == "html":
-                    initial_content = extract_main_content_from_html(raw_body or "", body_preview)
-                else:
-                    initial_content = (raw_body or body_preview or "").strip()
-                
-                # Clean email content using LLM (with fallback to simple extraction) - only for analysis
-                print(f"🧹 Cleaning email content with LLM...")
-                main_content = clean_email_content_with_llm(initial_content)
-                
-                # Validate extracted content - if it looks like analysis or is empty, use fallback
-                if (not main_content or 
-                    len(main_content.strip()) < 5 or
-                    "analysis" in main_content.lower()[:100] or
-                    "the conversation shows" in main_content.lower()[:100] or
-                    "we need to" in main_content.lower()[:100] or
-                    main_content.startswith("s any") or  # Common analysis fragment
-                    main_content.startswith("the block")):
-                    print(f"⚠️ LLM returned invalid content, using simple extraction...")
-                    main_content = extract_simple_newest_content(initial_content)
-                
-                print(f"✅ Email content cleaned: {len(main_content)} characters")
-                
-                # If conversation exists and has a ticket, add as comment (follow-up)
-                if existing_conversation and existing_conversation.ticket_id:
-                    # Follow-up: Add as comment to existing ticket
-                    # Note: placeholder_log already exists from earlier reservation
-                    
-                    ticket = Ticket.query.get(existing_conversation.ticket_id)
-                    if ticket:
-                        # Add full email content as comment (use raw content, not processed)
-                        comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
-                        
-                        # Check if this exact comment already exists (prevent duplicates)
-                        existing_comment = TicketComment.query.filter_by(
-                            ticket_id=ticket.id,
-                            user_id=user_id,
-                            comment=comment_text
-                        ).first()
-                        
-                        if existing_comment:
-                            print(f"⏭️ Comment already exists for email {email_id}, skipping...")
-                            # Update placeholder log with ticket info
-                            placeholder_log.ticket_id = ticket.id
-                            placeholder_log.user_id = user_id
-                            placeholder_log.is_followup = True
-                            db.session.commit()
-                            skipped_count += 1
-                            continue
-                        
-                        comment = TicketComment(
-                            ticket_id=ticket.id,
-                            user_id=user_id,
-                            comment=comment_text
-                        )
-                        db.session.add(comment)
-                        
-                        # Update placeholder log with ticket_id, user_id, and is_followup flag
-                        placeholder_log.ticket_id = ticket.id
-                        placeholder_log.user_id = user_id
-                        placeholder_log.is_followup = True
-                        db.session.commit()
-                        
-                        comments_added += 1
-                        processed_count += 1
-                        print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
-                    else:
-                        print(f"⚠️ Ticket {existing_conversation.ticket_id} not found for conversation {conversation_id}")
-                else:
-                    # New conversation: Create new ticket
-                    # CRITICAL: Double-check conversation_id wasn't missed (race condition protection)
-                    if conversation_id:
-                        # Check if this conversation already has a ticket (from cache)
-                        if conversation_id in conversation_ticket_cache:
-                            print(f"🔍 Found cached ticket #{conversation_ticket_cache[conversation_id]} for conversation {conversation_id}")
-                            ticket = Ticket.query.get(conversation_ticket_cache[conversation_id])
-                            if ticket:
-                                # Add full email content as comment (use raw content, not processed)
-                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
-                                
-                                # Check if this exact comment already exists (prevent duplicates)
-                                existing_comment = TicketComment.query.filter_by(
-                                    ticket_id=ticket.id,
-                                    user_id=user_id,
-                                    comment=comment_text
-                                ).first()
-                                
-                                if existing_comment:
-                                    print(f"⏭️ Comment already exists for email {email_id}, skipping...")
-                                    # Update placeholder log with ticket info
-                                    placeholder_log.ticket_id = ticket.id
-                                    placeholder_log.user_id = user_id
-                                    placeholder_log.is_followup = True
-                                    db.session.commit()
-                                    skipped_count += 1
-                                    continue
-                                
-                                comment = TicketComment(
-                                    ticket_id=ticket.id,
-                                    user_id=user_id,
-                                    comment=comment_text
-                                )
-                                db.session.add(comment)
-                                
-                                # Update placeholder log with ticket info
-                                placeholder_log.ticket_id = ticket.id
-                                placeholder_log.user_id = user_id
-                                placeholder_log.is_followup = True
-                                db.session.commit()
-                                
-                                comments_added += 1
-                                processed_count += 1
-                                print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
-                            else:
-                                print(f"⚠️ Ticket {final_conversation_check.ticket_id} not found for conversation {conversation_id}")
-                            continue
-                        # Re-check conversation_id one more time before creating ticket
-                        final_conversation_check = EmailProcessedLog.query.filter_by(
-                            conversation_id=conversation_id
-                        ).filter(
-                            EmailProcessedLog.ticket_id.isnot(None)
-                        ).first()
-                        
-                        if final_conversation_check:
-                            print(f"⚠️ Conversation {conversation_id} already has ticket #{final_conversation_check.ticket_id} (race condition), adding as comment instead...")
-                            # Add as comment instead of creating new ticket
-                            ticket = Ticket.query.get(final_conversation_check.ticket_id)
-                            if ticket:
-                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
-                                
-                                # Check if comment already exists
-                                existing_comment = TicketComment.query.filter_by(
-                                    ticket_id=ticket.id,
-                                    user_id=user_id,
-                                    comment=comment_text
-                                ).first()
-                                
-                                if not existing_comment:
-                                    comment = TicketComment(
-                                        ticket_id=ticket.id,
-                                        user_id=user_id,
-                                        comment=comment_text
-                                    )
-                                    db.session.add(comment)
-                                    
-                                    # Update placeholder log with ticket info
-                                    placeholder_log.ticket_id = ticket.id
-                                    placeholder_log.user_id = user_id
-                                    placeholder_log.is_followup = True
-                                    db.session.commit()
-                                    
-                                    comments_added += 1
-                                    processed_count += 1
-                                    print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
-                                else:
-                                    print(f"⏭️ Comment already exists, skipping...")
-                                    # Still log email as processed
-                                    email_log = EmailProcessedLog(
-                                        email_id=email_id,
-                                        conversation_id=conversation_id,
-                                        ticket_id=ticket.id,
-                                        sender_email=sender_email,
-                                        user_id=user_id,
-                                        email_subject=subject,
-                                        is_followup=True
-                                    )
-                                    # Update placeholder log
-                                    placeholder_log.ticket_id = ticket.id
-                                    placeholder_log.user_id = user_id
-                                    placeholder_log.is_followup = True
-                                    db.session.commit()
-                                    skipped_count += 1
-                            continue
-                    
-                    # Note: placeholder_log already exists from earlier reservation
-                    # No need to check again - the unique constraint prevents duplicates
-                    
-                    # Use IT category for all email tickets
-                    category_id = None
-                    matched_category = None
-                    
-                    # Find IT category
-                    it_category = Category.query.filter(
-                        Category.name.ilike("IT")
-                    ).first()
-                    if it_category:
-                        category_id = it_category.id
-                        matched_category = it_category
-                        print(f"✅ Using IT category for email ticket")
-                    
-                    # FINAL CHECK: One more time check conversation_id before creating ticket
-                    # This is critical to prevent duplicates when multiple emails arrive simultaneously
-                    if conversation_id:
-                        last_check = EmailProcessedLog.query.filter_by(
-                            conversation_id=conversation_id
-                        ).filter(
-                            EmailProcessedLog.ticket_id.isnot(None)
-                        ).first()
-                        
-                        if last_check:
-                            print(f"🚨 CRITICAL: Conversation {conversation_id} found ticket #{last_check.ticket_id} at last moment, aborting ticket creation!")
-                            # Add as comment instead
-                            ticket = Ticket.query.get(last_check.ticket_id)
-                            if ticket:
-                                comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{raw_email_content}"
-                                comment = TicketComment(
-                                    ticket_id=ticket.id,
-                                    user_id=user_id,
-                                    comment=comment_text
-                                )
-                                db.session.add(comment)
-                                
-                                # Update placeholder log with ticket info
-                                placeholder_log.ticket_id = ticket.id
-                                placeholder_log.user_id = user_id
-                                placeholder_log.is_followup = True
-                                db.session.commit()
-                                
-                                comments_added += 1
-                                processed_count += 1
-                                print(f"✅ Added comment to ticket #{ticket.id} from email {email_id}")
-                                continue
-                    
-                    # Create ticket (only if all checks passed)
-                    print(f"📝 Creating new ticket for conversation_id: {conversation_id or 'None'}")
-                    
-                    # Step 1: Analyze email content to extract the main issue for ticket message
-                    # Use main_content (cleaned) if it's substantial, otherwise use initial_content
-                    content_for_analysis = main_content if len(main_content.strip()) > 50 else initial_content
-                    print(f"🔍 Analyzing email content to extract main issue (using {len(content_for_analysis)} chars)...")
-                    analyzed_issue = analyze_email_issue_with_llm(content_for_analysis)
-                    print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
-                    
-                    # Step 2: Generate a short, clear title from the analyzed issue
-                    print(f"🔍 Generating ticket title from analyzed issue...")
-                    generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
-                    print(f"✅ Generated title: {generated_title}")
-                    
-                    # Create ticket with LLM-generated title and analyzed issue as details
-                    ticket = Ticket(
-                        clinic_id=None,  # Can be set later if needed
-                        title=generated_title,
-                        details=analyzed_issue or "(no content)",  # Use analyzed issue as ticket message
-                        category_id=category_id,
-                        status="Pending",
-                        priority="low",
-                        due_date=None,
-                        user_id=user_id,  # Sender as creator
-                        location_id=None,
-                        created_at=email_received_time  # Use exact email received time
-                    )
-                    db.session.add(ticket)
-                    db.session.commit()
-                    
-                    print(f"✅ Created ticket #{ticket.id} for conversation_id: {conversation_id}")
-                    
-                    # Step 2: Add full email content as a comment (use raw content, not processed)
-                    print(f"💬 Adding full email content as comment...")
-                    full_email_comment = f"📧 Email from {sender_name or sender_email}\n\n{raw_email_content}"
-                    comment = TicketComment(
-                        ticket_id=ticket.id,
-                        user_id=user_id,
-                        comment=full_email_comment
-                    )
-                    db.session.add(comment)
-                    db.session.commit()
-                    print(f"✅ Added full email content as comment to ticket #{ticket.id}")
-                    
-                    # Auto-assign if category has assignee
-                    if matched_category and matched_category.assignee_id:
-                        assignment = TicketAssignment(
-                            ticket_id=ticket.id,
-                            assign_to=matched_category.assignee_id,
-                            assign_by=None  # System-generated
-                        )
-                        db.session.add(assignment)
-                        db.session.commit()
-                        
-                        assignee_info = get_user_info_by_id(matched_category.assignee_id)
-                        if assignee_info:
-                            send_assign_email(ticket, assignee_info, {"username": "System"})
-                            create_notification(
-                                ticket_id=ticket.id,
-                                receiver_id=matched_category.assignee_id,
-                                sender_id=None,
-                                notification_type="assign",
-                                message=f"Auto-assigned from email: {subject}"
-                            )
-                    
-                    # Update placeholder log with ticket_id and user_id IMMEDIATELY after ticket creation
-                    # This must happen before processing next email to prevent duplicates
-                    placeholder_log.ticket_id = ticket.id
-                    placeholder_log.user_id = user_id
-                    db.session.commit()
-                    
-                    print(f"✅ Updated email log {email_id} → ticket #{ticket.id} for conversation {conversation_id}")
-                    
+                # Update metrics based on result
+                if result["status"] == "ticket_created":
                     tickets_created += 1
-                    processed_count += 1
-                    print(f"✅ Created ticket #{ticket.id} from email {email_id}")
-                
+                elif result["status"] == "comment_added":
+                    comments_added += 1
+                elif result["status"] == "skipped":
+                    skipped_count += 1
+                elif result["status"] == "error":
+                    error_count += 1
+                    
             except Exception as e:
-                print(f"❌ Error processing email {email.get('id', 'unknown')}: {e}")
+                print(f"❌ Unexpected error processing email {email.get('id', 'unknown')}: {e}")
+                error_count += 1
                 db.session.rollback()
-                # Try to clean up placeholder_log if it exists
-                try:
-                    if 'placeholder_log' in locals() and placeholder_log:
-                        # Check if placeholder_log still exists (might have been committed)
-                        existing_placeholder = EmailProcessedLog.query.filter_by(email_id=email.get("id")).first()
-                        if existing_placeholder and not existing_placeholder.ticket_id:
-                            # Only delete if no ticket was created
-                            db.session.delete(existing_placeholder)
-                            db.session.commit()
-                            print(f"🧹 Cleaned up placeholder log for failed email {email.get('id')}")
-                except Exception as cleanup_error:
-                    print(f"⚠️ Error cleaning up placeholder log: {cleanup_error}")
-                    db.session.rollback()
                 continue
         
         return {
             "status": "success",
-            "message": f"Processed {processed_count} emails",
+            "message": f"Processed {len(emails)} emails",
             "tickets_created": tickets_created,
             "comments_added": comments_added,
             "skipped": skipped_count,
+            "errors": error_count,
             "total_emails_fetched": len(emails),
             "time_range": f"Last 10 minutes (from {time_filter})"
         }
         
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Error processing emails: {e}")
+        print(f"❌ Critical error in email processing: {e}")
         return {"error": str(e), "status": "error"}
+
+
+def _process_single_email(email, conversation_ticket_cache, system_email_patterns):
+    """
+    Process a single email with comprehensive duplicate handling.
+    
+    Returns dict with status: "ticket_created", "comment_added", "skipped", or "error"
+    """
+    
+    email_id = email.get("id")
+    conversation_id = email.get("conversationId")
+    subject = email.get("subject", "")
+    sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
+    sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+    
+    print(f"\n{'='*60}")
+    print(f"📧 Processing email: {email_id}")
+    print(f"📋 Subject: {subject}")
+    print(f"👤 From: {sender_name} <{sender_email}>")
+    print(f"🔗 Conversation ID: {conversation_id}")
+    print(f"{'='*60}")
+    
+    # ========================================
+    # STEP 1: CHECK IF EMAIL ALREADY PROCESSED
+    # ========================================
+    existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+    if existing_log:
+        print(f"⏭️  Email {email_id} already processed (ticket #{existing_log.ticket_id})")
+        return {"status": "skipped", "reason": "already_processed", "email_id": email_id}
+    
+    # ========================================
+    # STEP 2: SKIP SYSTEM NOTIFICATION EMAILS
+    # ========================================
+    if subject and any(pattern in subject for pattern in system_email_patterns):
+        print(f"⏭️  Skipping system notification email: {subject}")
+        
+        # Log it to prevent reprocessing
+        try:
+            system_log = EmailProcessedLog(
+                email_id=email_id,
+                conversation_id=conversation_id,
+                ticket_id=None,
+                sender_email=sender_email,
+                user_id=None,
+                email_subject=subject,
+                is_followup=False
+            )
+            db.session.add(system_log)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"⚠️  Error logging system email (likely already logged): {e}")
+        
+        return {"status": "skipped", "reason": "system_email", "email_id": email_id}
+    
+    # ========================================
+    # STEP 3: RESERVE EMAIL_ID (PREVENT RACE CONDITIONS)
+    # ========================================
+    print(f"🔒 Reserving email_id {email_id}...")
+    try:
+        placeholder = EmailProcessedLog(
+            email_id=email_id,
+            conversation_id=conversation_id,
+            ticket_id=None,
+            sender_email=sender_email,
+            user_id=None,
+            email_subject=subject,
+            is_followup=False
+        )
+        db.session.add(placeholder)
+        db.session.commit()
+        print(f"✅ Email_id {email_id} reserved successfully")
+    except Exception as e:
+        db.session.rollback()
+        print(f"⏭️  Email {email_id} already being processed (reservation failed): {e}")
+        return {"status": "skipped", "reason": "reservation_failed", "email_id": email_id}
+    
+    # From this point on, we own this email_id - use try/except to ensure cleanup
+    try:
+        # ========================================
+        # STEP 4: PARSE EMAIL RECEIVED TIME
+        # ========================================
+        email_received_time = _parse_email_received_time(email.get("receivedDateTime"))
+        
+        # ========================================
+        # STEP 5: GET USER ID FROM SENDER EMAIL
+        # ========================================
+        user_id = None
+        if sender_email:
+            user_id = get_user_id_by_email(sender_email)
+            if not user_id:
+                print(f"⚠️  User not found for email: {sender_email}")
+        
+        # ========================================
+        # STEP 6: EXTRACT EMAIL CONTENT
+        # ========================================
+        raw_body = email.get("body", {}).get("content") if email.get("body") else None
+        content_type = email.get("body", {}).get("contentType") if email.get("body") else None
+        body_preview = email.get("bodyPreview", "")
+        
+        # Get raw email content (preserve everything for comments)
+        if content_type and content_type.lower() == "html" and raw_body:
+            from html import unescape
+            import re
+            text_content = re.sub(r'<[^>]+>', ' ', raw_body)
+            text_content = unescape(text_content)
+            raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
+        else:
+            raw_email_content = (raw_body or body_preview or "").strip()
+        
+        # Extract main content for analysis (cleaned version)
+        if content_type and content_type.lower() == "html":
+            initial_content = extract_main_content_from_html(raw_body or "", body_preview)
+        else:
+            initial_content = (raw_body or body_preview or "").strip()
+        
+        # Clean email content with LLM
+        print(f"🧹 Cleaning email content with LLM...")
+        main_content = clean_email_content_with_llm(initial_content)
+        
+        # Validate cleaned content
+        if (not main_content or len(main_content.strip()) < 5 or 
+            "analysis" in main_content.lower()[:100] or 
+            "the conversation shows" in main_content.lower()[:100]):
+            print(f"⚠️  LLM returned invalid content, using simple extraction...")
+            main_content = extract_simple_newest_content(initial_content)
+        
+        print(f"✅ Email content processed: {len(raw_email_content)} chars (raw), {len(main_content)} chars (cleaned)")
+        
+        # ========================================
+        # STEP 7: CHECK IF CONVERSATION HAS EXISTING TICKET
+        # (SINGLE AUTHORITATIVE CHECK)
+        # ========================================
+        existing_ticket_id = None
+        
+        if conversation_id:
+            print(f"🔍 Checking if conversation {conversation_id} already has a ticket...")
+            
+            # Check database first (authoritative source of truth)
+            existing_conv = EmailProcessedLog.query.filter_by(
+                conversation_id=conversation_id
+            ).filter(
+                EmailProcessedLog.ticket_id.isnot(None)
+            ).with_for_update().first()  # Lock to prevent race conditions
+            
+            if existing_conv:
+                existing_ticket_id = existing_conv.ticket_id
+                conversation_ticket_cache[conversation_id] = existing_ticket_id
+                print(f"✅ Found existing ticket #{existing_ticket_id} for conversation {conversation_id}")
+            else:
+                print(f"✅ No existing ticket for conversation {conversation_id}")
+        
+        # ========================================
+        # STEP 8: ADD AS COMMENT OR CREATE NEW TICKET
+        # ========================================
+        if existing_ticket_id:
+            # ADD AS COMMENT TO EXISTING TICKET
+            result = _add_email_as_comment(
+                ticket_id=existing_ticket_id,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                raw_email_content=raw_email_content,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+            return result
+            
+        else:
+            # CREATE NEW TICKET
+            result = _create_ticket_from_email(
+                email=email,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                subject=subject,
+                main_content=main_content,
+                initial_content=initial_content,
+                raw_email_content=raw_email_content,
+                email_received_time=email_received_time,
+                conversation_id=conversation_id,
+                conversation_ticket_cache=conversation_ticket_cache,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+            return result
+    
+    except Exception as e:
+        # Rollback will clean up the placeholder automatically
+        db.session.rollback()
+        print(f"❌ Error processing email {email_id}: {e}")
+        return {"status": "error", "reason": str(e), "email_id": email_id}
+
+
+def _parse_email_received_time(received_datetime_str):
+    """Parse email received time from Microsoft Graph API format"""
+    
+    if not received_datetime_str:
+        return datetime.utcnow()
+    
+    try:
+        iso_str = received_datetime_str.replace('Z', '+00:00')
+        
+        if '.' in iso_str and '+' in iso_str:
+            email_received_time = datetime.fromisoformat(iso_str)
+        elif '+' in iso_str:
+            email_received_time = datetime.fromisoformat(iso_str)
+        else:
+            email_received_time = datetime.strptime(received_datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+        
+        # Convert to UTC naive datetime (database stores UTC)
+        if email_received_time.tzinfo:
+            email_received_time = email_received_time.replace(tzinfo=None)
+        
+        return email_received_time
+        
+    except Exception as e:
+        print(f"⚠️  Error parsing receivedDateTime '{received_datetime_str}': {e}")
+        return datetime.utcnow()
+
+
+def _add_email_as_comment(ticket_id, user_id, sender_name, sender_email, 
+                          raw_email_content, placeholder, email_id):
+    """Add email as comment to existing ticket"""
+    
+    print(f"💬 Adding email as comment to ticket #{ticket_id}...")
+    
+    ticket = Ticket.query.get(ticket_id)
+    if not ticket:
+        print(f"⚠️  Ticket #{ticket_id} not found")
+        return {"status": "error", "reason": "ticket_not_found", "email_id": email_id}
+    
+    # Clean the email content with LLM before adding as comment
+    print(f"🧹 Cleaning follow-up email content with LLM ({len(raw_email_content)} chars)...")
+    cleaned_content = clean_email_content_with_llm(raw_email_content)
+    
+    # Validate cleaned content
+    if not cleaned_content or len(cleaned_content.strip()) < 5:
+        print(f"⚠️  LLM returned empty content, using simple extraction...")
+        cleaned_content = extract_simple_newest_content(raw_email_content)
+    
+    # If still empty or too short, use raw content as fallback
+    if not cleaned_content or len(cleaned_content.strip()) < 5:
+        print(f"⚠️  Extraction failed, using raw content...")
+        cleaned_content = raw_email_content
+    
+    print(f"✅ Cleaned content: {len(cleaned_content)} chars")
+    
+    # Create comment text with cleaned content
+    comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{cleaned_content}"
+    
+    # Check if comment already exists (prevent duplicates)
+    existing_comment = TicketComment.query.filter_by(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=comment_text
+    ).first()
+    
+    if existing_comment:
+        print(f"⏭️  Comment already exists for email {email_id}, skipping...")
+        
+        # Update placeholder log
+        placeholder.ticket_id = ticket.id
+        placeholder.user_id = user_id
+        placeholder.is_followup = True
+        db.session.commit()
+        
+        return {"status": "skipped", "reason": "duplicate_comment", "email_id": email_id, "ticket_id": ticket.id}
+    
+    # Add comment
+    comment = TicketComment(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=comment_text
+    )
+    db.session.add(comment)
+    
+    # Update placeholder log
+    placeholder.ticket_id = ticket.id
+    placeholder.user_id = user_id
+    placeholder.is_followup = True
+    
+    db.session.commit()
+    
+    print(f"✅ Added comment to ticket #{ticket.id}")
+    return {"status": "comment_added", "ticket_id": ticket.id, "email_id": email_id}
+
+
+def _create_ticket_from_email(email, user_id, sender_name, sender_email, subject,
+                               main_content, initial_content, raw_email_content,
+                               email_received_time, conversation_id, conversation_ticket_cache,
+                               placeholder, email_id):
+    """Create new ticket from email"""
+    
+    print(f"📝 Creating new ticket for email {email_id}...")
+    
+    # ========================================
+    # FINAL SAFETY CHECK BEFORE TICKET CREATION
+    # ========================================
+    if conversation_id:
+        print(f"🔒 Final safety check for conversation {conversation_id}...")
+        last_minute_check = EmailProcessedLog.query.filter_by(
+            conversation_id=conversation_id
+        ).filter(
+            EmailProcessedLog.ticket_id.isnot(None)
+        ).first()
+        
+        if last_minute_check:
+            print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} has ticket #{last_minute_check.ticket_id}")
+            print(f"⚠️  Aborting ticket creation, adding as comment instead...")
+            
+            # Redirect to comment instead
+            return _add_email_as_comment(
+                ticket_id=last_minute_check.ticket_id,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                raw_email_content=raw_email_content,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+    
+    # ========================================
+    # FIND IT CATEGORY
+    # ========================================
+    category_id = None
+    matched_category = None
+    
+    it_category = Category.query.filter(Category.name.ilike("IT")).first()
+    if it_category:
+        category_id = it_category.id
+        matched_category = it_category
+        print(f"✅ Using IT category (ID: {category_id})")
+    
+    # ========================================
+    # ANALYZE EMAIL WITH LLM
+    # ========================================
+    content_for_analysis = main_content if len(main_content.strip()) > 50 else initial_content
+    
+    print(f"🔍 Analyzing email content ({len(content_for_analysis)} chars)...")
+    analyzed_issue = analyze_email_issue_with_llm(content_for_analysis)
+    print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
+    
+    print(f"🔍 Generating ticket title...")
+    generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
+    print(f"✅ Generated title: {generated_title}")
+    
+    # ========================================
+    # CREATE TICKET
+    # ========================================
+    ticket = Ticket(
+        clinic_id=None,
+        title=generated_title,
+        details=analyzed_issue or "(no content)",
+        category_id=category_id,
+        status="Pending",
+        priority="low",
+        due_date=None,
+        user_id=user_id,
+        location_id=None,
+        created_at=email_received_time
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    
+    print(f"✅ Created ticket #{ticket.id}")
+    
+    # ========================================
+    # ADD FULL EMAIL AS COMMENT (CLEANED)
+    # ========================================
+    print(f"🧹 Cleaning email content for comment...")
+    cleaned_email_content = clean_email_content_with_llm(raw_email_content)
+    
+    # Validate cleaned content
+    if not cleaned_email_content or len(cleaned_email_content.strip()) < 5:
+        print(f"⚠️  LLM returned empty content, using simple extraction...")
+        cleaned_email_content = extract_simple_newest_content(raw_email_content)
+    
+    # If still empty, use raw as fallback
+    if not cleaned_email_content or len(cleaned_email_content.strip()) < 5:
+        print(f"⚠️  Using raw content as fallback...")
+        cleaned_email_content = raw_email_content
+    
+    print(f"✅ Comment content cleaned: {len(cleaned_email_content)} chars")
+    
+    full_email_comment = f"📧 Email from {sender_name or sender_email}\n\n{cleaned_email_content}"
+    
+    comment = TicketComment(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=full_email_comment
+    )
+    db.session.add(comment)
+    db.session.commit()
+    
+    print(f"💬 Added full email content as comment")
+    
+    # ========================================
+    # AUTO-ASSIGN IF CATEGORY HAS ASSIGNEE
+    # ========================================
+    if matched_category and matched_category.assignee_id:
+        assignment = TicketAssignment(
+            ticket_id=ticket.id,
+            assign_to=matched_category.assignee_id,
+            assign_by=None  # System-generated
+        )
+        db.session.add(assignment)
+        db.session.commit()
+        
+        assignee_info = get_user_info_by_id(matched_category.assignee_id)
+        if assignee_info:
+            send_assign_email(ticket, assignee_info, {"username": "System"})
+            create_notification(
+                ticket_id=ticket.id,
+                receiver_id=matched_category.assignee_id,
+                sender_id=None,
+                notification_type="assign",
+                message=f"Auto-assigned from email: {subject}"
+            )
+        
+        print(f"👤 Auto-assigned to user #{matched_category.assignee_id}")
+    
+    # ========================================
+    # UPDATE PLACEHOLDER LOG
+    # ========================================
+    placeholder.ticket_id = ticket.id
+    placeholder.user_id = user_id
+    placeholder.is_followup = False
+    db.session.commit()
+    
+    # ========================================
+    # UPDATE CACHE FOR NEXT EMAILS
+    # ========================================
+    if conversation_id:
+        conversation_ticket_cache[conversation_id] = ticket.id
+        print(f"📦 Cached conversation {conversation_id} → ticket #{ticket.id}")
+    
+    print(f"✅ Ticket #{ticket.id} created successfully from email {email_id}")
+    
+    return {"status": "ticket_created", "ticket_id": ticket.id, "email_id": email_id}
+
+
+
+def _process_single_email(email, conversation_ticket_cache, system_email_patterns):
+    """
+    Process a single email with comprehensive duplicate handling.
+    
+    Returns dict with status: "ticket_created", "comment_added", "skipped", or "error"
+    """
+    
+    email_id = email.get("id")
+    conversation_id = email.get("conversationId")
+    subject = email.get("subject", "")
+    sender_email = email.get("from", {}).get("emailAddress", {}).get("address") if email.get("from") else None
+    sender_name = email.get("from", {}).get("emailAddress", {}).get("name") if email.get("from") else None
+    
+    print(f"\n{'='*60}")
+    print(f"📧 Processing email: {email_id}")
+    print(f"📋 Subject: {subject}")
+    print(f"👤 From: {sender_name} <{sender_email}>")
+    print(f"🔗 Conversation ID: {conversation_id}")
+    print(f"{'='*60}")
+    
+    # ========================================
+    # STEP 1: CHECK IF EMAIL ALREADY PROCESSED
+    # ========================================
+    existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
+    if existing_log:
+        print(f"⏭️  Email {email_id} already processed (ticket #{existing_log.ticket_id})")
+        return {"status": "skipped", "reason": "already_processed", "email_id": email_id}
+    
+    # ========================================
+    # STEP 2: SKIP SYSTEM NOTIFICATION EMAILS
+    # ========================================
+    if subject and any(pattern in subject for pattern in system_email_patterns):
+        print(f"⏭️  Skipping system notification email: {subject}")
+        
+        # Log it to prevent reprocessing
+        try:
+            system_log = EmailProcessedLog(
+                email_id=email_id,
+                conversation_id=conversation_id,
+                ticket_id=None,
+                sender_email=sender_email,
+                user_id=None,
+                email_subject=subject,
+                is_followup=False
+            )
+            db.session.add(system_log)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"⚠️  Error logging system email (likely already logged): {e}")
+        
+        return {"status": "skipped", "reason": "system_email", "email_id": email_id}
+    
+    # ========================================
+    # STEP 3: RESERVE EMAIL_ID (PREVENT RACE CONDITIONS)
+    # ========================================
+    print(f"🔒 Reserving email_id {email_id}...")
+    try:
+        placeholder = EmailProcessedLog(
+            email_id=email_id,
+            conversation_id=conversation_id,
+            ticket_id=None,
+            sender_email=sender_email,
+            user_id=None,
+            email_subject=subject,
+            is_followup=False
+        )
+        db.session.add(placeholder)
+        db.session.commit()
+        print(f"✅ Email_id {email_id} reserved successfully")
+    except Exception as e:
+        db.session.rollback()
+        print(f"⏭️  Email {email_id} already being processed (reservation failed): {e}")
+        return {"status": "skipped", "reason": "reservation_failed", "email_id": email_id}
+    
+    # From this point on, we own this email_id - use try/except to ensure cleanup
+    try:
+        # ========================================
+        # STEP 4: PARSE EMAIL RECEIVED TIME
+        # ========================================
+        email_received_time = _parse_email_received_time(email.get("receivedDateTime"))
+        
+        # ========================================
+        # STEP 5: GET USER ID FROM SENDER EMAIL
+        # ========================================
+        user_id = None
+        if sender_email:
+            user_id = get_user_id_by_email(sender_email)
+            if not user_id:
+                print(f"⚠️  User not found for email: {sender_email}")
+        
+        # ========================================
+        # STEP 6: EXTRACT EMAIL CONTENT
+        # ========================================
+        raw_body = email.get("body", {}).get("content") if email.get("body") else None
+        content_type = email.get("body", {}).get("contentType") if email.get("body") else None
+        body_preview = email.get("bodyPreview", "")
+        
+        # Get raw email content (preserve everything for comments)
+        if content_type and content_type.lower() == "html" and raw_body:
+            from html import unescape
+            import re
+            text_content = re.sub(r'<[^>]+>', ' ', raw_body)
+            text_content = unescape(text_content)
+            raw_email_content = text_content.strip() if text_content.strip() else (body_preview or "")
+        else:
+            raw_email_content = (raw_body or body_preview or "").strip()
+        
+        # Extract main content for analysis (cleaned version)
+        if content_type and content_type.lower() == "html":
+            initial_content = extract_main_content_from_html(raw_body or "", body_preview)
+        else:
+            initial_content = (raw_body or body_preview or "").strip()
+        
+        # Clean email content with LLM
+        print(f"🧹 Cleaning email content with LLM...")
+        main_content = clean_email_content_with_llm(initial_content)
+        
+        # Validate cleaned content
+        if (not main_content or len(main_content.strip()) < 5 or 
+            "analysis" in main_content.lower()[:100] or 
+            "the conversation shows" in main_content.lower()[:100]):
+            print(f"⚠️  LLM returned invalid content, using simple extraction...")
+            main_content = extract_simple_newest_content(initial_content)
+        
+        print(f"✅ Email content processed: {len(raw_email_content)} chars (raw), {len(main_content)} chars (cleaned)")
+        
+        # ========================================
+        # STEP 7: CHECK IF CONVERSATION HAS EXISTING TICKET
+        # (SINGLE AUTHORITATIVE CHECK)
+        # ========================================
+        existing_ticket_id = None
+        
+        if conversation_id:
+            print(f"🔍 Checking if conversation {conversation_id} already has a ticket...")
+            
+            # Check database first (authoritative source of truth)
+            existing_conv = EmailProcessedLog.query.filter_by(
+                conversation_id=conversation_id
+            ).filter(
+                EmailProcessedLog.ticket_id.isnot(None)
+            ).with_for_update().first()  # Lock to prevent race conditions
+            
+            if existing_conv:
+                existing_ticket_id = existing_conv.ticket_id
+                conversation_ticket_cache[conversation_id] = existing_ticket_id
+                print(f"✅ Found existing ticket #{existing_ticket_id} for conversation {conversation_id}")
+            else:
+                print(f"✅ No existing ticket for conversation {conversation_id}")
+        
+        # ========================================
+        # STEP 8: ADD AS COMMENT OR CREATE NEW TICKET
+        # ========================================
+        if existing_ticket_id:
+            # ADD AS COMMENT TO EXISTING TICKET
+            result = _add_email_as_comment(
+                ticket_id=existing_ticket_id,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                raw_email_content=raw_email_content,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+            return result
+            
+        else:
+            # CREATE NEW TICKET
+            result = _create_ticket_from_email(
+                email=email,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                subject=subject,
+                main_content=main_content,
+                initial_content=initial_content,
+                raw_email_content=raw_email_content,
+                email_received_time=email_received_time,
+                conversation_id=conversation_id,
+                conversation_ticket_cache=conversation_ticket_cache,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+            return result
+    
+    except Exception as e:
+        # Rollback will clean up the placeholder automatically
+        db.session.rollback()
+        print(f"❌ Error processing email {email_id}: {e}")
+        return {"status": "error", "reason": str(e), "email_id": email_id}
+
+
+def _parse_email_received_time(received_datetime_str):
+    """Parse email received time from Microsoft Graph API format"""
+    
+    if not received_datetime_str:
+        return datetime.utcnow()
+    
+    try:
+        iso_str = received_datetime_str.replace('Z', '+00:00')
+        
+        if '.' in iso_str and '+' in iso_str:
+            email_received_time = datetime.fromisoformat(iso_str)
+        elif '+' in iso_str:
+            email_received_time = datetime.fromisoformat(iso_str)
+        else:
+            email_received_time = datetime.strptime(received_datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+        
+        # Convert to UTC naive datetime (database stores UTC)
+        if email_received_time.tzinfo:
+            email_received_time = email_received_time.replace(tzinfo=None)
+        
+        return email_received_time
+        
+    except Exception as e:
+        print(f"⚠️  Error parsing receivedDateTime '{received_datetime_str}': {e}")
+        return datetime.utcnow()
+
+
+def _add_email_as_comment(ticket_id, user_id, sender_name, sender_email, 
+                          raw_email_content, placeholder, email_id):
+    """Add email as comment to existing ticket"""
+    
+    print(f"💬 Adding email as comment to ticket #{ticket_id}...")
+    
+    ticket = Ticket.query.get(ticket_id)
+    if not ticket:
+        print(f"⚠️  Ticket #{ticket_id} not found")
+        return {"status": "error", "reason": "ticket_not_found", "email_id": email_id}
+    
+    # Clean the email content with LLM before adding as comment
+    print(f"🧹 Cleaning follow-up email content with LLM ({len(raw_email_content)} chars)...")
+    cleaned_content = clean_email_content_with_llm(raw_email_content)
+    
+    # Validate cleaned content
+    if not cleaned_content or len(cleaned_content.strip()) < 5:
+        print(f"⚠️  LLM returned empty content, using simple extraction...")
+        cleaned_content = extract_simple_newest_content(raw_email_content)
+    
+    # If still empty or too short, use raw content as fallback
+    if not cleaned_content or len(cleaned_content.strip()) < 5:
+        print(f"⚠️  Extraction failed, using raw content...")
+        cleaned_content = raw_email_content
+    
+    print(f"✅ Cleaned content: {len(cleaned_content)} chars")
+    
+    # Create comment text with cleaned content
+    comment_text = f"📧 Email Follow-up from {sender_name or sender_email}\n\n{cleaned_content}"
+    
+    # Check if comment already exists (prevent duplicates)
+    existing_comment = TicketComment.query.filter_by(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=comment_text
+    ).first()
+    
+    if existing_comment:
+        print(f"⏭️  Comment already exists for email {email_id}, skipping...")
+        
+        # Update placeholder log
+        placeholder.ticket_id = ticket.id
+        placeholder.user_id = user_id
+        placeholder.is_followup = True
+        db.session.commit()
+        
+        return {"status": "skipped", "reason": "duplicate_comment", "email_id": email_id, "ticket_id": ticket.id}
+    
+    # Add comment
+    comment = TicketComment(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=comment_text
+    )
+    db.session.add(comment)
+    
+    # Update placeholder log
+    placeholder.ticket_id = ticket.id
+    placeholder.user_id = user_id
+    placeholder.is_followup = True
+    
+    db.session.commit()
+    
+    print(f"✅ Added comment to ticket #{ticket.id}")
+    return {"status": "comment_added", "ticket_id": ticket.id, "email_id": email_id}
+
+
+
+def _create_ticket_from_email(email, user_id, sender_name, sender_email, subject,
+                               main_content, initial_content, raw_email_content,
+                               email_received_time, conversation_id, conversation_ticket_cache,
+                               placeholder, email_id):
+    """Create new ticket from email"""
+    
+    print(f"📝 Creating new ticket for email {email_id}...")
+    
+    # ========================================
+    # FINAL SAFETY CHECK BEFORE TICKET CREATION
+    # ========================================
+    if conversation_id:
+        print(f"🔒 Final safety check for conversation {conversation_id}...")
+        last_minute_check = EmailProcessedLog.query.filter_by(
+            conversation_id=conversation_id
+        ).filter(
+            EmailProcessedLog.ticket_id.isnot(None)
+        ).first()
+        
+        if last_minute_check:
+            print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} has ticket #{last_minute_check.ticket_id}")
+            print(f"⚠️  Aborting ticket creation, adding as comment instead...")
+            
+            # Redirect to comment instead
+            return _add_email_as_comment(
+                ticket_id=last_minute_check.ticket_id,
+                user_id=user_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+                raw_email_content=raw_email_content,
+                placeholder=placeholder,
+                email_id=email_id
+            )
+    
+    # ========================================
+    # FIND IT CATEGORY
+    # ========================================
+    category_id = None
+    matched_category = None
+    
+    it_category = Category.query.filter(Category.name.ilike("IT")).first()
+    if it_category:
+        category_id = it_category.id
+        matched_category = it_category
+        print(f"✅ Using IT category (ID: {category_id})")
+    
+    # ========================================
+    # ANALYZE EMAIL WITH LLM
+    # ========================================
+    content_for_analysis = main_content if len(main_content.strip()) > 50 else initial_content
+    
+    print(f"🔍 Analyzing email content ({len(content_for_analysis)} chars)...")
+    analyzed_issue = analyze_email_issue_with_llm(content_for_analysis)
+    print(f"✅ Analyzed issue: {analyzed_issue[:100]}...")
+    
+    print(f"🔍 Generating ticket title...")
+    generated_title = generate_ticket_title_with_llm(analyzed_issue, sender_name, sender_email)
+    print(f"✅ Generated title: {generated_title}")
+    
+    # ========================================
+    # CREATE TICKET
+    # ========================================
+    ticket = Ticket(
+        clinic_id=None,
+        title=generated_title,
+        details=analyzed_issue or "(no content)",
+        category_id=category_id,
+        status="Pending",
+        priority="low",
+        due_date=None,
+        user_id=user_id,
+        location_id=None,
+        created_at=email_received_time
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    
+    print(f"✅ Created ticket #{ticket.id}")
+    
+    # ========================================
+    # ADD FULL EMAIL AS COMMENT
+    # ========================================
+    full_email_comment = f"📧 Email from {sender_name or sender_email}\n\n{raw_email_content}"
+    
+    comment = TicketComment(
+        ticket_id=ticket.id,
+        user_id=user_id,
+        comment=full_email_comment
+    )
+    db.session.add(comment)
+    db.session.commit()
+    
+    print(f"💬 Added full email content as comment")
+    
+    # ========================================
+    # AUTO-ASSIGN IF CATEGORY HAS ASSIGNEE
+    # ========================================
+    if matched_category and matched_category.assignee_id:
+        assignment = TicketAssignment(
+            ticket_id=ticket.id,
+            assign_to=matched_category.assignee_id,
+            assign_by=None  # System-generated
+        )
+        db.session.add(assignment)
+        db.session.commit()
+        
+        assignee_info = get_user_info_by_id(matched_category.assignee_id)
+        if assignee_info:
+            send_assign_email(ticket, assignee_info, {"username": "System"})
+            create_notification(
+                ticket_id=ticket.id,
+                receiver_id=matched_category.assignee_id,
+                sender_id=None,
+                notification_type="assign",
+                message=f"Auto-assigned from email: {subject}"
+            )
+        
+        print(f"👤 Auto-assigned to user #{matched_category.assignee_id}")
+    
+    # ========================================
+    # UPDATE PLACEHOLDER LOG
+    # ========================================
+    placeholder.ticket_id = ticket.id
+    placeholder.user_id = user_id
+    placeholder.is_followup = False
+    db.session.commit()
+    
+    # ========================================
+    # UPDATE CACHE FOR NEXT EMAILS
+    # ========================================
+    if conversation_id:
+        conversation_ticket_cache[conversation_id] = ticket.id
+        print(f"📦 Cached conversation {conversation_id} → ticket #{ticket.id}")
+    
+    print(f"✅ Ticket #{ticket.id} created successfully from email {email_id}")
+    
+    return {"status": "ticket_created", "ticket_id": ticket.id, "email_id": email_id}
 
 
 @ticket_bp.route("/process_emails", methods=["POST"])
@@ -2678,15 +3119,12 @@ def process_emails():
     """
     result = _process_emails_internal()
     
-    # If result is a dict (from internal function), convert to JSON response
     if isinstance(result, dict):
         if result.get("status") == "error":
             return jsonify(result), 500
         return jsonify(result), 200
     
-    # If it's already a Flask response, return it
     return result
-
 
 @ticket_bp.route("/read_emails", methods=["GET"])
 # @require_api_key
