@@ -81,120 +81,120 @@ def get_clinic_locations_map(clinic_id):
 @require_api_key
 # @validate_token
 def create_ticket():
-    data = request.form
+    try:
+        data = request.form
 
-    # Parse due_date
-    due_date = None
-    if data.get("due_date"):
-        try:
-            due_date = datetime.strptime(data["due_date"], "%Y-%m-%d").date()
-        except ValueError:
-            return jsonify({"error": "Invalid due_date format. Use YYYY-MM-DD"}), 400
+        # Parse due_date
+        due_date = None
+        if data.get("due_date"):
+            try:
+                due_date = datetime.strptime(data["due_date"], "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "Invalid due_date format. Use YYYY-MM-DD"}), 400
 
-    ticket = Ticket(
-        clinic_id=data.get("clinic_id"),
-        location_id=data.get("location_id"),
-        user_id=data.get("user_id"),
-        title=data.get("title"),
-        details=data.get("details"),
-        category_id=data.get("category_id"),
-        status=data.get("status", "Pending"),
-        priority=data.get("priority"),
-        due_date=due_date
-    )
-    db.session.add(ticket)
-    db.session.commit()
+        ticket = Ticket(
+            clinic_id=data.get("clinic_id"),
+            location_id=data.get("location_id"),
+            user_id=data.get("user_id"),
+            title=data.get("title"),
+            details=data.get("details"),
+            category_id=data.get("category_id"),
+            status=data.get("status", "Pending"),
+            priority=data.get("priority"),
+            due_date=due_date
+        )
+        db.session.add(ticket)
+        db.session.flush()  # Get ticket.id without committing
 
-    # Multiple file upload
-    uploaded_files = []
-    if "files" in request.files:
-        for f in request.files.getlist("files"):
-            if f.filename:
-                try:
-                    print(f.filename)
-                    file_url = upload_to_s3(f, folder=f"tickets/{ticket.id}")
-                    tf = TicketFile(ticket_id=ticket.id, file_url=file_url, file_name=f.filename)
-                    db.session.add(tf)
-                    uploaded_files.append({"name": f.filename, "url": file_url})
-                except Exception as e:
-                    db.session.rollback()
-                    return jsonify({"error": str(e)}), 500
+        # Multiple file upload
+        uploaded_files = []
+        if "files" in request.files:
+            for f in request.files.getlist("files"):
+                if f.filename:
+                    try:
+                        print(f.filename)
+                        file_url = upload_to_s3(f, folder=f"tickets/{ticket.id}")
+                        tf = TicketFile(ticket_id=ticket.id, file_url=file_url, file_name=f.filename)
+                        db.session.add(tf)
+                        uploaded_files.append({"name": f.filename, "url": file_url})
+                    except Exception as e:
+                        db.session.rollback()
+                        return jsonify({"error": str(e)}), 500
+
+        # Follow-up users
+        followup_user_ids = data.get("followup_user_ids")  # e.g. "12,15"
+        if followup_user_ids:
+            ids = [int(uid.strip()) for uid in followup_user_ids.split(",") if uid.strip().isdigit()]
+            for uid in ids:
+                user_info = get_user_info_by_id(uid)
+                if user_info:
+                    # 1. Save TicketFollowUp entry
+                    followup = TicketFollowUp(
+                        ticket_id=ticket.id,
+                        user_id=uid,
+                        note=f"Added as follow-up by user {ticket.user_id}"
+                    )
+                    db.session.add(followup)
+
+                    # 2. Send email
+                    send_follow_email(ticket, user_info)
+
+                    # 3. Save notification
+                    create_notification(
+                        ticket_id=ticket.id,
+                        receiver_id=uid,
+                        sender_id=ticket.user_id,    # jisne ticket create ki
+                        notification_type="followup",
+                        message=f"Added as follow-up by user {ticket.user_id}"
+                    )
+
+        # Category assignee email bhejna
+        if ticket.category_id:
+            category = Category.query.get(ticket.category_id)
+            if category and category.assignee_id:
+                assignee_info = get_user_info_by_id(category.assignee_id)
+
+                # 👇 Ticket creator ka info le aao
+                assigner_info = get_user_info_by_id(ticket.user_id)
+
+                print("Assignee:", assignee_info)
+                print("Assigner:", assigner_info)
+
+                if assignee_info:
+                    # 1. Save TicketAssignment
+                    assignment = TicketAssignment(
+                        ticket_id=ticket.id,
+                        assign_to=category.assignee_id,
+                        assign_by=ticket.user_id
+                    )
+                    db.session.add(assignment)
+
+                    # 2. Send email
+                    send_assign_email(ticket, assignee_info, assigner_info)
+
+                    # 3. Save notification
+                    create_notification(
+                        ticket_id=ticket.id,
+                        receiver_id=assignee_info["id"],
+                        sender_id=ticket.user_id,   
+                        notification_type="assign",
+                        message=f"Assigned to you by {assigner_info['username']}"
+                    )
+
+        # ✅ SINGLE COMMIT - All or nothing atomicity
         db.session.commit()
 
-    # -----------------------------
-    # Follow-up users
-
-    followup_user_ids = data.get("followup_user_ids")  # e.g. "12,15"
-    if followup_user_ids:
-        ids = [int(uid.strip()) for uid in followup_user_ids.split(",") if uid.strip().isdigit()]
-        for uid in ids:
-            user_info = get_user_info_by_id(uid)
-            if user_info:
-                # 1. Save TicketFollowUp entry
-                followup = TicketFollowUp(
-                    ticket_id=ticket.id,
-                    user_id=uid,
-                    note=f"Added as follow-up by user {ticket.user_id}"
-                )
-                db.session.add(followup)
-
-                # 2. Send email
-                send_follow_email(ticket, user_info)
-
-                # 3. Save notification
-                create_notification(
-                    ticket_id=ticket.id,
-                    receiver_id=uid,
-                    sender_id=ticket.user_id,    # jisne ticket create ki
-                    notification_type="followup",
-                    message=f"Added as follow-up by user {ticket.user_id}"
-                )
-        db.session.commit()
-
-
-
-    # Category assignee email bhejna
-    if ticket.category_id:
-        category = Category.query.get(ticket.category_id)
-        if category and category.assignee_id:
-            assignee_info = get_user_info_by_id(category.assignee_id)
-
-            # 👇 Ticket creator ka info le aao
-            assigner_info = get_user_info_by_id(ticket.user_id)
-
-            print("Assignee:", assignee_info)
-            print("Assigner:", assigner_info)
-
-            if assignee_info:
-                # 1. Save TicketAssignment
-                assignment = TicketAssignment(
-                    ticket_id=ticket.id,
-                    assign_to=category.assignee_id,
-                    assign_by=ticket.user_id
-                )
-                db.session.add(assignment)
-                db.session.commit()
-
-                # 2. Send email
-                send_assign_email(ticket, assignee_info, assigner_info)
-
-                # 3. Save notification
-                create_notification(
-                    ticket_id=ticket.id,
-                    receiver_id=assignee_info["id"],
-                    sender_id=ticket.user_id,   
-                    notification_type="assign",
-                    message=f"Assigned to you by {assigner_info['username']}"
-                )
-
-
-
-    return jsonify({
-        "success": True,
-        "message": "Ticket created",
-        "ticket_id": ticket.id,
-        "files": uploaded_files
-    })
+        return jsonify({
+            "success": True,
+            "message": "Ticket created",
+            "ticket_id": ticket.id,
+            "files": uploaded_files
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error creating ticket: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────────────────────
 # Update Ticket
