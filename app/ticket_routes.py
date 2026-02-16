@@ -2148,7 +2148,7 @@ def _process_emails_internal():
         if not token:
             return {"error": "Failed to get Microsoft Graph access token", "status": "error"}
         
-        # Calculate time 10 minutes ago (in UTC)
+        # Calculate time 15 minutes ago (in UTC) - slightly more than scheduler interval to catch any missed emails
         ten_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
         time_filter = ten_minutes_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
         
@@ -2268,8 +2268,28 @@ def _process_single_email(email, conversation_ticket_cache, system_email_pattern
     # ========================================
     existing_log = EmailProcessedLog.query.filter_by(email_id=email_id).first()
     if existing_log:
-        print(f"⏭️  Email {email_id} already processed (ticket #{existing_log.ticket_id})")
-        return {"status": "skipped", "reason": "already_processed", "email_id": email_id}
+        # If this email was already processed, check if it should be re-processed as a follow-up
+        # This can happen if the email was processed but not properly linked to a ticket
+        if existing_log.ticket_id is None and conversation_id:
+            # Check if this conversation has any tickets
+            conversation_ticket = EmailProcessedLog.query.filter_by(
+                conversation_id=conversation_id
+            ).filter(
+                EmailProcessedLog.ticket_id.isnot(None)
+            ).first()
+
+            if conversation_ticket:
+                print(f"📧 Re-processing email {email_id} as follow-up to ticket #{conversation_ticket.ticket_id}")
+                # Delete the old log and continue processing
+                db.session.delete(existing_log)
+                db.session.commit()
+            else:
+                print(f"⏭️  Email {email_id} already processed (no ticket)")
+                return {"status": "skipped", "reason": "already_processed", "email_id": email_id}
+        else:
+            print(f"⏭️  Email {email_id} already processed (ticket #{existing_log.ticket_id})")
+            return {"status": "skipped", "reason": "already_processed", "email_id": email_id}
+
     
     # ========================================
     # STEP 2: SKIP SYSTEM NOTIFICATION EMAILS
@@ -2334,16 +2354,50 @@ def _process_single_email(email, conversation_ticket_cache, system_email_pattern
             print(f"🔍 Checking if conversation {conversation_id} already has a ticket...")
 
             # Check database first (authoritative source of truth) - do this early to prevent race conditions
+            # Look for ANY processed log for this conversation (including placeholders being processed)
             existing_conv = EmailProcessedLog.query.filter_by(
                 conversation_id=conversation_id
-            ).filter(
-                EmailProcessedLog.ticket_id.isnot(None)
             ).with_for_update().first()  # Lock to prevent race conditions
 
             if existing_conv:
-                existing_ticket_id = existing_conv.ticket_id
-                conversation_ticket_cache[conversation_id] = existing_ticket_id
-                print(f"✅ Found existing ticket #{existing_ticket_id} for conversation {conversation_id}")
+                # If it has a ticket_id, we can add as comment
+                if existing_conv.ticket_id is not None:
+                    existing_ticket_id = existing_conv.ticket_id
+                    conversation_ticket_cache[conversation_id] = existing_ticket_id
+                    print(f"✅ Found existing ticket #{existing_ticket_id} for conversation {conversation_id}")
+                else:
+                    # If it's just a placeholder (ticket_id is None), check if this conversation already has completed tickets
+                    # If it does, this email should be processed as a comment
+                    conversation_has_ticket = EmailProcessedLog.query.filter_by(
+                        conversation_id=conversation_id
+                    ).filter(
+                        EmailProcessedLog.ticket_id.isnot(None)
+                    ).first()
+
+                    if conversation_has_ticket:
+                        # Conversation already has a ticket, so this email should be added as a comment
+                        existing_ticket_id = conversation_has_ticket.ticket_id
+                        conversation_ticket_cache[conversation_id] = existing_ticket_id
+                        print(f"📧 Follow-up email detected for existing ticket #{existing_ticket_id} (placeholder found but proceeding)")
+                    else:
+                        # No completed tickets yet, check if placeholder is stale
+                        # Consider a placeholder stale if it's more than 15 minutes old
+                        from datetime import timedelta
+                        fifteen_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
+
+                        if existing_conv.processed_at < fifteen_minutes_ago:
+                            print(f"⚠️ Found stale placeholder for conversation {conversation_id} (created {existing_conv.processed_at}), cleaning up and proceeding...")
+                            # Clean up the stale placeholder and continue processing
+                            db.session.delete(existing_conv)
+                            db.session.commit()
+                            # Continue with normal processing
+                        else:
+                            # Placeholder is recent and no tickets exist, another email is currently creating the first ticket
+                            print(f"⚠️ Conversation {conversation_id} is currently being processed (recent placeholder found), skipping...")
+                            # Clean up our placeholder since we're not processing this email
+                            db.session.delete(placeholder)
+                            db.session.commit()
+                            return {"status": "skipped", "reason": "conversation_being_processed", "email_id": email_id}
             else:
                 print(f"✅ No existing ticket for conversation {conversation_id}")
 
@@ -2543,24 +2597,65 @@ def _create_ticket_from_email(email, user_id, sender_name, sender_email, subject
         print(f"🔒 Final safety check for conversation {conversation_id}...")
         last_minute_check = EmailProcessedLog.query.filter_by(
             conversation_id=conversation_id
-        ).filter(
-            EmailProcessedLog.ticket_id.isnot(None)
         ).first()
-        
+
         if last_minute_check:
-            print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} has ticket #{last_minute_check.ticket_id}")
-            print(f"⚠️  Aborting ticket creation, adding as comment instead...")
-            
-            # Redirect to comment instead
-            return _add_email_as_comment(
-                ticket_id=last_minute_check.ticket_id,
-                user_id=user_id,
-                sender_name=sender_name,
-                sender_email=sender_email,
-                raw_email_content=raw_email_content,
-                placeholder=placeholder,
-                email_id=email_id
-            )
+            if last_minute_check.ticket_id is not None:
+                print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} has ticket #{last_minute_check.ticket_id}")
+                print(f"⚠️  Aborting ticket creation, adding as comment instead...")
+
+                # Redirect to comment instead
+                return _add_email_as_comment(
+                    ticket_id=last_minute_check.ticket_id,
+                    user_id=user_id,
+                    sender_name=sender_name,
+                    sender_email=sender_email,
+                    raw_email_content=raw_email_content,
+                    placeholder=placeholder,
+                    email_id=email_id
+                )
+            else:
+                # Check if this conversation already has completed tickets
+                conversation_has_ticket = EmailProcessedLog.query.filter_by(
+                    conversation_id=conversation_id
+                ).filter(
+                    EmailProcessedLog.ticket_id.isnot(None)
+                ).first()
+
+                if conversation_has_ticket:
+                    # Conversation already has a ticket, redirect to comment
+                    print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} has ticket #{conversation_has_ticket.ticket_id}")
+                    print(f"⚠️  Aborting ticket creation, adding as comment instead...")
+
+                    return _add_email_as_comment(
+                        ticket_id=conversation_has_ticket.ticket_id,
+                        user_id=user_id,
+                        sender_name=sender_name,
+                        sender_email=sender_email,
+                        raw_email_content=raw_email_content,
+                        placeholder=placeholder,
+                        email_id=email_id
+                    )
+                else:
+                    # No completed tickets, check if placeholder is stale
+                    from datetime import timedelta
+                    fifteen_minutes_ago = datetime.utcnow() - timedelta(minutes=15)
+
+                    if last_minute_check.processed_at < fifteen_minutes_ago:
+                        print(f"⚠️ Found stale placeholder for conversation {conversation_id} (created {last_minute_check.processed_at}), cleaning up and proceeding...")
+                        # Clean up the stale placeholder
+                        db.session.delete(last_minute_check)
+                        db.session.commit()
+                        # Continue with ticket creation
+                    else:
+                        # Another email from this conversation is being processed and no tickets exist yet
+                        print(f"🚨 RACE CONDITION DETECTED: Conversation {conversation_id} is being processed by another email")
+                        print(f"⚠️  Aborting ticket creation, will be processed later...")
+
+                        # Clean up placeholder and skip
+                        db.session.delete(placeholder)
+                        db.session.commit()
+                        return {"status": "skipped", "reason": "race_condition_detected", "email_id": email_id}
     
     # ========================================
     # FIND IT CATEGORY
