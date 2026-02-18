@@ -756,10 +756,23 @@ def get_tickets():
             query = query.filter(or_(*status_filters))
     if category_id:
         query = query.filter(Ticket.category_id == category_id)
+
     if start_date:
-        query = query.filter(Ticket.created_at >= start_date)
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            query = query.filter(Ticket.created_at >= start_dt)
+        except ValueError:
+            pass
+
     if end_date:
-        query = query.filter(Ticket.created_at <= end_date)
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            query = query.filter(Ticket.created_at <= end_dt)
+        except ValueError:
+            pass
+
     if search:
         # Check if search term is numeric (could be a ticket ID)
         search_conditions = [
@@ -2355,9 +2368,11 @@ def _process_single_email(email, conversation_ticket_cache, system_email_pattern
 
             # Check database first (authoritative source of truth) - do this early to prevent race conditions
             # Look for ANY processed log for this conversation (including placeholders being processed)
-            existing_conv = EmailProcessedLog.query.filter_by(
-                conversation_id=conversation_id
-            ).with_for_update().first()  # Lock to prevent race conditions
+            existing_conv = EmailProcessedLog.query.filter(
+                EmailProcessedLog.conversation_id == conversation_id,
+                EmailProcessedLog.email_id != email_id   # 🚀 IMPORTANT
+            ).first()
+
 
             if existing_conv:
                 # If it has a ticket_id, we can add as comment
@@ -2395,9 +2410,9 @@ def _process_single_email(email, conversation_ticket_cache, system_email_pattern
                             # Placeholder is recent and no tickets exist, another email is currently creating the first ticket
                             print(f"⚠️ Conversation {conversation_id} is currently being processed (recent placeholder found), skipping...")
                             # Clean up our placeholder since we're not processing this email
-                            db.session.delete(placeholder)
-                            db.session.commit()
-                            return {"status": "skipped", "reason": "conversation_being_processed", "email_id": email_id}
+                            # db.session.delete(placeholder)
+                            # db.session.commit()
+                            # return {"status": "skipped", "reason": "conversation_being_processed", "email_id": email_id}
             else:
                 print(f"✅ No existing ticket for conversation {conversation_id}")
 
@@ -2595,9 +2610,11 @@ def _create_ticket_from_email(email, user_id, sender_name, sender_email, subject
     # ========================================
     if conversation_id:
         print(f"🔒 Final safety check for conversation {conversation_id}...")
-        last_minute_check = EmailProcessedLog.query.filter_by(
-            conversation_id=conversation_id
+        last_minute_check = EmailProcessedLog.query.filter(
+            EmailProcessedLog.conversation_id == conversation_id,
+            EmailProcessedLog.email_id != email_id  # ignore our own placeholder
         ).first()
+
 
         if last_minute_check:
             if last_minute_check.ticket_id is not None:
