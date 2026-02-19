@@ -8,12 +8,12 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from openai import OpenAI
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+# from apscheduler.schedulers.background import BackgroundScheduler
+# from apscheduler.triggers.cron import CronTrigger
 # ─── shared extensions ───────────────────────────────────────────
 db = SQLAlchemy()
 migrate = Migrate()
-scheduler = BackgroundScheduler()
+# scheduler = BackgroundScheduler()
 
 llm_client = OpenAI(
     base_url="http://69.30.85.208:22148/v1/",
@@ -67,50 +67,50 @@ def create_app(config_path: str | None = None):
         return jsonify(status="ok"), 200
 
     # 6) Setup scheduled tasks (cron jobs)
-    def setup_scheduler(app):
-        """Setup background scheduler for periodic tasks"""
-        try:
-            from app.ticket_routes import _process_emails_internal
+    # def setup_scheduler(app):
+    #     """Setup background scheduler for periodic tasks"""
+    #     try:
+    #         from app.ticket_routes import _process_emails_internal
             
-            def run_email_processing():
-                """Wrapper to run email processing in app context"""
-                with app.app_context():
-                    try:
-                        result = _process_emails_internal()
-                        if result.get("status") == "success":
-                            print(f"✅ Scheduled email processing: {result.get('message')}")
-                        else:
-                            print(f"⚠️ Scheduled email processing: {result.get('error', 'Unknown error')}")
-                    except Exception as e:
-                        print(f"❌ Scheduled email processing error: {e}")
+    #         def run_email_processing():
+    #             """Wrapper to run email processing in app context"""
+    #             with app.app_context():
+    #                 try:
+    #                     result = _process_emails_internal()
+    #                     if result.get("status") == "success":
+    #                         print(f"[SUCCESS] Scheduled email processing: {result.get('message')}")
+    #                     else:
+    #                         print(f"[WARNING] Scheduled email processing: {result.get('error', 'Unknown error')}")
+    #                 except Exception as e:
+    #                     print(f"[ERROR] Scheduled email processing error: {e}")
             
-            # Check if scheduler is already running
-            if scheduler.running:
-                print("⚠️ Scheduler is already running, skipping initialization")
-                return
+    #         # Check if scheduler is already running
+    #         if scheduler.running:
+    #             print("[WARNING] Scheduler is already running, skipping initialization")
+    #             return
             
-            # Schedule email processing to run every 10 minutes
-            scheduler.add_job(
-                func=run_email_processing,
-                trigger=CronTrigger(minute='*/10'),  # Every 10 minutes
-                id='process_emails_job',
-                name='Process emails from last 10 minutes',
-                replace_existing=True
-            )
+    #         # Schedule email processing to run every 10 minutes
+    #         scheduler.add_job(
+    #             func=run_email_processing,
+    #             trigger=CronTrigger(minute='*/10'),  # Every 10 minutes
+    #             id='process_emails_job',
+    #             name='Process emails from last 10 minutes',
+    #             replace_existing=True
+    #         )
             
-            # Start scheduler
-            scheduler.start()
-            print("✅ Scheduler started - Email processing will run every 10 minutes")
-        except Exception as e:
-            print(f"❌ Failed to initialize scheduler: {e}")
-            # Don't raise - allow app to continue without scheduler
+    #         # Start scheduler
+    #         scheduler.start()
+    #         print("[SUCCESS] Scheduler started - Email processing will run every 10 minutes")
+    #     except Exception as e:
+    #         print(f"[ERROR] Failed to initialize scheduler: {e}")
+    #         # Don't raise - allow app to continue without scheduler
     
-    # Initialize scheduler when app is created
-    with app.app_context():
-        setup_scheduler(app)
+    # # Initialize scheduler when app is created
+    # with app.app_context():
+    #     setup_scheduler(app)
     
     # Shutdown scheduler when app closes
-    import atexit
-    atexit.register(lambda: scheduler.shutdown() if scheduler.running else None)
+    # import atexit
+    # atexit.register(lambda: scheduler.shutdown() if scheduler.running else None)
 
     return app
