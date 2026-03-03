@@ -16,7 +16,7 @@ migrate = Migrate()
 # scheduler = BackgroundScheduler()
 
 llm_client = OpenAI(
-    base_url="http://69.30.85.208:22148/v1/",
+    base_url="http://69.30.85.208:22032/v1/",
     api_key="389e5f28-62d0-46c6-9cbc-0099da90ff30"  # dummy key, Ollama doesn't validate it
 )
 
