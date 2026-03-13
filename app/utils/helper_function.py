@@ -33,18 +33,49 @@ s3 = boto3.client(
 ALLOWED_EXT = {"png", "jpg", "jpeg", "gif", "pdf", "doc", "docx", "csv", "xls", "xlsx", "webp"}
 
 # ─── Helper: Upload file to S3 ─────────────────────────────
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
 def upload_to_s3(f, folder="tickets"):
+
+    # Check extension
     ext = f.filename.rsplit(".", 1)[1].lower()
     if ext not in ALLOWED_EXT:
         raise ValueError("File type not allowed")
-    key  = f"{folder}/{uuid.uuid4().hex}.{ext}"
-    ctyp = f.content_type or mimetypes.guess_type(f.filename)[0] or "application/octet-stream"
-    try:
-        s3.upload_fileobj(f, S3_BUCKET, key, ExtraArgs={"ContentType": ctyp, "ACL": "private"})
-    except botocore.exceptions.ClientError as e:
-        raise RuntimeError(f"S3 upload failed: {e.response['Error']['Message']}")
-    return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
+    # Check file size
+    f.seek(0, os.SEEK_END)
+    file_size = f.tell()
+    f.seek(0)
+
+    if file_size > MAX_FILE_SIZE:
+        raise ValueError("File size exceeds 5MB limit")
+
+    key = f"{folder}/{uuid.uuid4().hex}.{ext}"
+
+    ctyp = (
+        f.content_type
+        or mimetypes.guess_type(f.filename)[0]
+        or "application/octet-stream"
+    )
+
+    try:
+        s3.upload_fileobj(
+            f,
+            S3_BUCKET,
+            key,
+            ExtraArgs={
+                "ContentType": ctyp,
+                "ACL": "private"
+            }
+        )
+
+    except botocore.exceptions.ClientError as e:
+        raise RuntimeError(
+            f"S3 upload failed: {e.response['Error']['Message']}"
+        )
+
+    return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 # ─── Helper: Send email (dummy) ─────────────────────────────
 # from datetime import datetime
 # from flask import current_app

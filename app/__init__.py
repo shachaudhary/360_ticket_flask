@@ -27,7 +27,7 @@ def create_app(config_path: str | None = None):
     Only ProductionConfig or DevelopmentConfig via FLASK_CONFIG.
     """
     app = Flask(__name__)
-
+    app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB
     # 1) CORS
     CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 
